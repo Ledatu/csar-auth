@@ -1,4 +1,4 @@
-# csar-auth
+# csar-authn
 
 A standalone OAuth authentication service for the [**csar**](https://github.com/ledatu/csar) platform. It handles multi-provider OAuth login via [Goth](https://github.com/markbates/goth), maps social identities to internal user UUIDs stored in PostgreSQL, issues signed JWT session tokens, and exposes a JWKS endpoint so the csar router can validate sessions independently.
 
@@ -34,8 +34,8 @@ A standalone OAuth authentication service for the [**csar**](https://github.com/
 ### Installation
 
 ```bash
-git clone https://github.com/Ledatu/csar-auth.git
-cd csar-auth
+git clone https://github.com/Ledatu/csar-authn.git
+cd csar-authn
 go mod download
 ```
 
@@ -98,7 +98,7 @@ make run
 
 # Or build first, then run manually
 make build
-./bin/csar-auth -config config.yaml
+./bin/csar-authn -config config.yaml
 ```
 
 ## Development
@@ -119,7 +119,7 @@ make clean
 
 ## Key Management
 
-On startup, `csar-auth` looks for PEM key files in the following order:
+On startup, `csar-authn` looks for PEM key files in the following order:
 
 1. Explicit `jwt.private_key_file` and `jwt.public_key_file` paths in config
 2. `<key_dir>/private.pem` and `<key_dir>/public.pem`
@@ -129,7 +129,7 @@ Key IDs (`kid`) are derived from the SHA-256 hash of the DER-encoded public key 
 
 ## JWT Claims
 
-Tokens issued by `csar-auth` include the following standard claims:
+Tokens issued by `csar-authn` include the following standard claims:
 
 | Claim | Description |
 |-------|-------------|

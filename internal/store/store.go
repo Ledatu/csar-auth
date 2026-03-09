@@ -1,4 +1,4 @@
-// Package store defines the persistence interface for csar-auth.
+// Package store defines the persistence interface for csar-authn.
 //
 // The Store interface abstracts user and OAuth account storage,
 // allowing implementations for PostgreSQL, MongoDB, YDB, etc.
@@ -42,7 +42,7 @@ type OAuthAccount struct {
 	UpdatedAt      time.Time
 }
 
-// Store defines the persistence contract for csar-auth.
+// Store defines the persistence contract for csar-authn.
 // Implementations must be safe for concurrent use.
 type Store interface {
 	// GetUserByID returns a user by primary key.

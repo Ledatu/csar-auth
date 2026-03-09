@@ -292,7 +292,7 @@ type assertionHeader struct {
 // assertionClaims represents the JWT payload of an incoming assertion.
 type assertionClaims struct {
 	Iss string `json:"iss"` // service account name
-	Aud string `json:"aud"` // must match csar-auth's issuer
+	Aud string `json:"aud"` // must match csar-authn's issuer
 	Exp int64  `json:"exp"`
 	Nbf int64  `json:"nbf"`
 	Iat int64  `json:"iat"`
@@ -371,7 +371,7 @@ func parseAndVerifyAssertion(tokenStr string, sa *serviceAccount, expectedAud st
 		return nil, fmt.Errorf("assertion not yet valid (nbf)")
 	}
 
-	// Validate audience — must match csar-auth's own issuer.
+	// Validate audience — must match csar-authn's own issuer.
 	if claims.Aud != expectedAud {
 		return nil, fmt.Errorf("audience mismatch: got %q, expected %q", claims.Aud, expectedAud)
 	}

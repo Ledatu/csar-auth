@@ -14,7 +14,7 @@ import (
 	"github.com/Ledatu/csar-authn/internal/config"
 )
 
-// Claims represents the JWT payload issued by csar-auth.
+// Claims represents the JWT payload issued by csar-authn.
 type Claims struct {
 	Sub         string `json:"sub"`                    // user UUID
 	Email       string `json:"email,omitempty"`        // user email
@@ -67,7 +67,7 @@ func (m *Manager) Keys() *KeyPair {
 // STSClaims represents the JWT payload for STS-issued scoped tokens.
 type STSClaims struct {
 	Sub string   `json:"sub"` // service account name
-	Iss string   `json:"iss"` // csar-auth issuer
+	Iss string   `json:"iss"` // csar-authn issuer
 	Aud []string `json:"aud"` // scoped audiences
 	Exp int64    `json:"exp"` // expiration (Unix)
 	Iat int64    `json:"iat"` // issued at (Unix)

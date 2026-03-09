@@ -1,4 +1,4 @@
-// csar-auth is a standalone OAuth authentication service.
+// csar-authn is a standalone OAuth authentication service.
 //
 // It handles multi-provider OAuth login (via Goth), maps social identities
 // to internal user UUIDs, issues JWT session tokens, and exposes a JWKS

@@ -1,4 +1,4 @@
-// Package handler wires HTTP routes for csar-auth.
+// Package handler wires HTTP routes for csar-authn.
 package handler
 
 import (

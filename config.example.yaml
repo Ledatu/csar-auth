@@ -1,5 +1,5 @@
 # --- Config Source ---
-# By default csar-auth reads this file from disk.
+# By default csar-authn reads this file from disk.
 # To load config from S3-compatible storage instead, use CLI flags or env vars:
 #
 #   --config-source / CONFIG_SOURCE          "file" (default) or "s3"

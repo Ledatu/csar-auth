@@ -1,4 +1,4 @@
-module github.com/Ledatu/csar-auth
+module github.com/Ledatu/csar-authn
 
 go 1.25.0
 

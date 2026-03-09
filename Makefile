@@ -1,11 +1,11 @@
 .PHONY: build run test lint clean
 
 BIN_DIR := bin
-BINARY  := $(BIN_DIR)/csar-auth
+BINARY  := $(BIN_DIR)/csar-authn
 
 build:
 	@mkdir -p $(BIN_DIR)
-	go build -o $(BINARY) ./cmd/csar-auth
+	go build -o $(BINARY) ./cmd/csar-authn
 
 run: build
 	$(BINARY) -config config.yaml

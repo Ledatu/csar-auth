@@ -25,7 +25,7 @@ import (
 
 var jtiCounter atomic.Int64
 
-const testIssuer = "http://test-csar-auth"
+const testIssuer = "http://test-csar-authn"
 
 type testEnv struct {
 	handler   *Handler

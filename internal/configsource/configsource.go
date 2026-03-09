@@ -1,6 +1,6 @@
-// Package configsource provides config source wiring for csar-auth.
+// Package configsource provides config source wiring for csar-authn.
 // It re-exports csar-core/configsource types and provides a BuildSource
-// factory so that main.go (and any future csar-auth subcommands) stay thin.
+// factory so that main.go (and any future csar-authn subcommands) stay thin.
 package configsource
 
 import (

@@ -1,4 +1,4 @@
-// Package config handles loading and validating csar-auth configuration.
+// Package config handles loading and validating csar-authn configuration.
 package config
 
 import (
@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the top-level csar-auth configuration.
+// Config is the top-level csar-authn configuration.
 type Config struct {
 	ListenAddr  string         `yaml:"listen_addr"`
 	BaseURL     string         `yaml:"base_url"`
@@ -25,18 +25,18 @@ type Config struct {
 
 // STSConfig controls the Security Token Service for service-to-service auth.
 type STSConfig struct {
-	Enabled         bool                              `yaml:"enabled"`
-	AssertionMaxAge Duration                          `yaml:"assertion_max_age"` // default: "5m"
-	ServiceAccounts map[string]ServiceAccountConfig   `yaml:"service_accounts"`
+	Enabled         bool                            `yaml:"enabled"`
+	AssertionMaxAge Duration                        `yaml:"assertion_max_age"` // default: "5m"
+	ServiceAccounts map[string]ServiceAccountConfig `yaml:"service_accounts"`
 }
 
 // ServiceAccountConfig defines a single service account for STS token exchange.
 type ServiceAccountConfig struct {
-	PublicKeyFile     string   `yaml:"public_key_file"`      // path to PEM public key
-	PublicKey         string   `yaml:"public_key"`           // OR inline PEM
-	AllowedAudiences  []string `yaml:"allowed_audiences"`    // e.g. ["balance"]
-	AllowAllAudiences bool     `yaml:"allow_all_audiences"`  // if true, audience param is optional and defaults to all allowed
-	TokenTTL          Duration `yaml:"token_ttl"`            // default: inherits jwt.ttl
+	PublicKeyFile     string   `yaml:"public_key_file"`     // path to PEM public key
+	PublicKey         string   `yaml:"public_key"`          // OR inline PEM
+	AllowedAudiences  []string `yaml:"allowed_audiences"`   // e.g. ["balance"]
+	AllowAllAudiences bool     `yaml:"allow_all_audiences"` // if true, audience param is optional and defaults to all allowed
+	TokenTTL          Duration `yaml:"token_ttl"`           // default: inherits jwt.ttl
 }
 
 // DatabaseConfig selects the storage backend.
