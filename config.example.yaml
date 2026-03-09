@@ -1,3 +1,25 @@
+# --- Config Source ---
+# By default csar-auth reads this file from disk.
+# To load config from S3-compatible storage instead, use CLI flags or env vars:
+#
+#   --config-source / CONFIG_SOURCE          "file" (default) or "s3"
+#   --config        / CONFIG_FILE            path to config file (file source, default: config.yaml)
+#
+# S3 source settings:
+#   --config-s3-bucket          / CONFIG_S3_BUCKET              (required for s3)
+#   --config-s3-key             / CONFIG_S3_KEY                 (default: config.yaml)
+#   --config-s3-endpoint        / CONFIG_S3_ENDPOINT            (default: https://storage.yandexcloud.net)
+#   --config-s3-region          / CONFIG_S3_REGION              (default: ru-central1)
+#   --config-s3-auth-mode       / CONFIG_S3_AUTH_MODE           (default: static)
+#   --config-s3-access-key-id   / CONFIG_S3_ACCESS_KEY_ID
+#   --config-s3-secret-access-key / CONFIG_S3_SECRET_ACCESS_KEY
+#   --config-s3-iam-token       / CONFIG_S3_IAM_TOKEN
+#   --config-s3-oauth-token     / CONFIG_S3_OAUTH_TOKEN
+#   --config-s3-sa-key-file     / CONFIG_S3_SA_KEY_FILE
+#
+# Optional periodic re-fetch (validates new config, hot-reload planned):
+#   --config-refresh-interval   / CONFIG_REFRESH_INTERVAL       (default: 0 = disabled; e.g. "60s")
+
 listen_addr: ":8081"
 base_url: "http://localhost:8081"
 frontend_url: "http://localhost:3000"

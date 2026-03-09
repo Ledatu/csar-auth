@@ -149,7 +149,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "iat claim is required")
 		return
 	}
-	assertionAge := time.Since(time.Unix(claims.Iat, 0))
+	iatTime := time.Unix(claims.Iat, 0)
+	if iatTime.After(time.Now().Add(clockSkew)) {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "assertion issued in the future")
+		return
+	}
+	assertionAge := time.Since(iatTime)
 	if assertionAge > h.assertionMaxAge+clockSkew {
 		writeError(w, http.StatusUnauthorized, "invalid_grant", "assertion too old")
 		return
@@ -171,7 +176,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	replayed, err := h.replayStore.CheckAndRecord(r.Context(), claims.Jti, time.Unix(claims.Exp, 0))
+	replayed, err := h.replayStore.CheckAndRecord(r.Context(), claims.Iss, claims.Jti, time.Unix(claims.Exp, 0))
 	if err != nil {
 		h.logger.Error("replay store check failed", "sa", issuer, "error", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "replay check failed")

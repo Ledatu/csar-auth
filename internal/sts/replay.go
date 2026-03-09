@@ -7,11 +7,12 @@ import (
 )
 
 // ReplayStore tracks JTI values to prevent assertion replay attacks.
+// Keys are scoped by (issuer, jti) to prevent cross-account collisions.
 // Implementations must be safe for concurrent use.
 type ReplayStore interface {
-	// CheckAndRecord returns true if the JTI was already seen (replay).
+	// CheckAndRecord returns true if the (issuer, jti) pair was already seen (replay).
 	// If not previously seen, records it with the given expiration time.
-	CheckAndRecord(ctx context.Context, jti string, exp time.Time) (bool, error)
+	CheckAndRecord(ctx context.Context, issuer, jti string, exp time.Time) (bool, error)
 }
 
 // memoryReplayStore is an in-memory ReplayStore for single-instance deployments
@@ -34,14 +35,15 @@ func NewMemoryReplayStore() *memoryReplayStore {
 	return s
 }
 
-func (s *memoryReplayStore) CheckAndRecord(_ context.Context, jti string, exp time.Time) (bool, error) {
+func (s *memoryReplayStore) CheckAndRecord(_ context.Context, issuer, jti string, exp time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.entries[jti]; exists {
+	key := issuer + "\x00" + jti
+	if _, exists := s.entries[key]; exists {
 		return true, nil
 	}
-	s.entries[jti] = exp
+	s.entries[key] = exp
 	return false, nil
 }
 

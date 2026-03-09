@@ -24,12 +24,12 @@ func NewPostgresReplayStore(pool *pgxpool.Pool) *PostgresReplayStore {
 	return s
 }
 
-// CheckAndRecord atomically checks if the JTI exists and inserts it if not.
-// Returns true if the JTI was already present (replay detected).
-func (s *PostgresReplayStore) CheckAndRecord(ctx context.Context, jti string, exp time.Time) (bool, error) {
+// CheckAndRecord atomically checks if the (issuer, jti) pair exists and
+// inserts it if not. Returns true if the pair was already present (replay detected).
+func (s *PostgresReplayStore) CheckAndRecord(ctx context.Context, issuer, jti string, exp time.Time) (bool, error) {
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO sts_jti_log (jti, expires_at) VALUES ($1, $2) ON CONFLICT (jti) DO NOTHING`,
-		jti, exp,
+		`INSERT INTO sts_jti_log (issuer, jti, expires_at) VALUES ($1, $2, $3) ON CONFLICT (issuer, jti) DO NOTHING`,
+		issuer, jti, exp,
 	)
 	if err != nil {
 		return false, err

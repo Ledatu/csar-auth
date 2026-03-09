@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS sts_jti_log (
 CREATE INDEX IF NOT EXISTS idx_sts_jti_log_expires_at ON sts_jti_log (expires_at);
 `,
 	},
+	{
+		name: "003_sts_jti_log_add_issuer",
+		up: `
+ALTER TABLE sts_jti_log ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT '';
+ALTER TABLE sts_jti_log DROP CONSTRAINT IF EXISTS sts_jti_log_pkey;
+ALTER TABLE sts_jti_log ADD PRIMARY KEY (issuer, jti);
+`,
+	},
 }
 
 // runMigrations creates a migrations tracking table and applies pending migrations.

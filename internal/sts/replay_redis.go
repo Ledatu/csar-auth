@@ -21,14 +21,14 @@ func NewRedisReplayStore(client *redis.Client) *RedisReplayStore {
 	return &RedisReplayStore{client: client, keyPrefix: "sts:jti:"}
 }
 
-// CheckAndRecord atomically checks if the JTI was already seen and records it
-// if not. Returns true when the JTI already existed (replay detected).
-func (s *RedisReplayStore) CheckAndRecord(ctx context.Context, jti string, exp time.Time) (bool, error) {
+// CheckAndRecord atomically checks if the (issuer, jti) pair was already seen
+// and records it if not. Returns true when the pair already existed (replay detected).
+func (s *RedisReplayStore) CheckAndRecord(ctx context.Context, issuer, jti string, exp time.Time) (bool, error) {
 	ttl := time.Until(exp)
 	if ttl <= 0 {
 		ttl = time.Second
 	}
-	ok, err := s.client.SetNX(ctx, s.keyPrefix+jti, "1", ttl).Result()
+	ok, err := s.client.SetNX(ctx, s.keyPrefix+issuer+":"+jti, "1", ttl).Result()
 	if err != nil {
 		return false, err
 	}

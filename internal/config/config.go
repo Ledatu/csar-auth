@@ -113,16 +113,20 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
+	return LoadFromBytes(data)
+}
 
+// LoadFromBytes parses raw YAML bytes into a Config, expanding environment
+// variables, applying defaults, and validating. This is the entry point used
+// by both file-based and S3/HTTP config sources.
+func LoadFromBytes(data []byte) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
+		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	// Expand environment variables in string fields post-unmarshal.
 	expandEnvInConfig(&cfg)
 
-	// Apply defaults.
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8081"
 	}
