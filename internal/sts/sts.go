@@ -4,7 +4,6 @@
 package sts
 
 import (
-	"context"
 	"crypto"
 	"crypto/ed25519"
 	"crypto/rsa"
@@ -17,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Ledatu/csar-auth/internal/config"
@@ -28,27 +26,28 @@ const clockSkew = 30 * time.Second
 
 // serviceAccount holds a loaded service account's public key and permissions.
 type serviceAccount struct {
-	PublicKey        crypto.PublicKey
-	Algorithm        string          // detected from key type: "RS256" or "EdDSA"
-	AllowedAudiences map[string]bool // set of allowed audience strings
-	TokenTTL         time.Duration   // 0 means use default
+	PublicKey         crypto.PublicKey
+	Algorithm         string          // detected from key type: "RS256" or "EdDSA"
+	AllowedAudiences  map[string]bool // set of allowed audience strings
+	AllowAllAudiences bool            // when true, omitting audience param returns all allowed
+	TokenTTL          time.Duration   // 0 means use default
 }
 
 // Handler handles STS token exchange requests (POST /sts/token).
 type Handler struct {
 	accounts        map[string]*serviceAccount // keyed by SA name
 	sessionMgr      *session.Manager
-	jtiCache        *jtiCache
+	replayStore     ReplayStore
 	assertionMaxAge time.Duration
 	defaultTTL      time.Duration // from jwt.ttl
 	issuer          string        // expected "aud" in incoming assertions
 	logger          *slog.Logger
-	cancel          context.CancelFunc // for JTI cleanup goroutine
 }
 
 // New creates an STS handler, loading all service account public keys.
+// If replayStore is nil, a local in-memory replay store is used as fallback.
 // Returns an error if any key fails to load (fail-fast).
-func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.Manager, logger *slog.Logger) (*Handler, error) {
+func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.Manager, replayStore ReplayStore, logger *slog.Logger) (*Handler, error) {
 	accounts := make(map[string]*serviceAccount, len(stsCfg.ServiceAccounts))
 
 	for name, saCfg := range stsCfg.ServiceAccounts {
@@ -68,10 +67,11 @@ func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.M
 		}
 
 		accounts[name] = &serviceAccount{
-			PublicKey:        pubKey,
-			Algorithm:        alg,
-			AllowedAudiences: audSet,
-			TokenTTL:         saCfg.TokenTTL.Std(),
+			PublicKey:         pubKey,
+			Algorithm:         alg,
+			AllowedAudiences:  audSet,
+			AllowAllAudiences: saCfg.AllowAllAudiences,
+			TokenTTL:          saCfg.TokenTTL.Std(),
 		}
 		logger.Info("loaded STS service account",
 			"name", name,
@@ -80,30 +80,25 @@ func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.M
 		)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cache := newJTICache(ctx)
+	if replayStore == nil {
+		replayStore = NewMemoryReplayStore()
+		logger.Warn("STS using in-memory replay store; not suitable for multi-instance production")
+	}
 
 	return &Handler{
 		accounts:        accounts,
 		sessionMgr:      sessionMgr,
-		jtiCache:        cache,
+		replayStore:     replayStore,
 		assertionMaxAge: stsCfg.AssertionMaxAge.Std(),
 		defaultTTL:      jwtCfg.TTL.Std(),
 		issuer:          jwtCfg.Issuer,
 		logger:          logger,
-		cancel:          cancel,
 	}, nil
-}
-
-// Stop shuts down the JTI cleanup goroutine.
-func (h *Handler) Stop() {
-	if h.cancel != nil {
-		h.cancel()
-	}
 }
 
 // ServeHTTP handles POST /sts/token requests.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 	if err := r.ParseForm(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "malformed form body")
 		return
@@ -128,14 +123,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Pre-parse assertion to extract issuer (SA name) before full verification.
 	issuer, err := extractIssuer(assertion)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_grant", "cannot parse assertion: "+err.Error())
+		h.logger.Warn("assertion parse failed", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid_grant", "invalid assertion")
 		return
 	}
 
 	// Look up the service account.
 	sa, ok := h.accounts[issuer]
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "invalid_client", "unknown service account")
+		h.logger.Warn("unknown service account", "sa", issuer)
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "authentication failed")
 		return
 	}
 
@@ -143,25 +140,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	claims, err := parseAndVerifyAssertion(assertion, sa, h.issuer)
 	if err != nil {
 		h.logger.Warn("assertion verification failed", "sa", issuer, "error", err)
-		writeError(w, http.StatusUnauthorized, "invalid_grant", err.Error())
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "authentication failed")
 		return
 	}
 
-	// Check assertion age.
-	if claims.Iat != 0 {
-		assertionAge := time.Since(time.Unix(claims.Iat, 0))
-		if assertionAge > h.assertionMaxAge+clockSkew {
-			writeError(w, http.StatusUnauthorized, "invalid_grant", "assertion too old")
-			return
-		}
+	// Require iat and enforce assertion lifetime bounds.
+	if claims.Iat == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "iat claim is required")
+		return
+	}
+	assertionAge := time.Since(time.Unix(claims.Iat, 0))
+	if assertionAge > h.assertionMaxAge+clockSkew {
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "assertion too old")
+		return
+	}
+	lifetime := time.Duration(claims.Exp-claims.Iat) * time.Second
+	if lifetime <= 0 || lifetime > h.assertionMaxAge {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "assertion lifetime out of bounds")
+		return
+	}
+	maxExp := time.Now().Add(h.assertionMaxAge + clockSkew)
+	if time.Unix(claims.Exp, 0).After(maxExp) {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "assertion exp too far in the future")
+		return
 	}
 
-	// Check JTI replay (if jti is present).
-	if claims.Jti != "" {
-		if h.jtiCache.Check(claims.Jti, time.Unix(claims.Exp, 0)) {
-			writeError(w, http.StatusUnauthorized, "invalid_grant", "assertion already used (jti replay)")
-			return
-		}
+	// Require JTI for replay protection.
+	if claims.Jti == "" {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "jti claim is required")
+		return
+	}
+
+	replayed, err := h.replayStore.CheckAndRecord(r.Context(), claims.Jti, time.Unix(claims.Exp, 0))
+	if err != nil {
+		h.logger.Error("replay store check failed", "sa", issuer, "error", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "replay check failed")
+		return
+	}
+	if replayed {
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "assertion already used")
+		return
 	}
 
 	// Resolve audiences.
@@ -173,12 +191,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		audiences = []string{audience}
-	} else {
-		// No audience requested — use all allowed audiences.
+	} else if sa.AllowAllAudiences {
+		// SA explicitly opts in to receiving all allowed audiences when none requested.
 		audiences = make([]string, 0, len(sa.AllowedAudiences))
 		for a := range sa.AllowedAudiences {
 			audiences = append(audiences, a)
 		}
+	} else {
+		writeError(w, http.StatusBadRequest, "invalid_request", "audience parameter is required")
+		return
 	}
 
 	// Determine TTL: SA-specific or global default.
@@ -377,55 +398,6 @@ func verifySignature(signingInput, signature []byte, pub crypto.PublicKey, alg s
 
 	default:
 		return fmt.Errorf("unsupported algorithm: %s", alg)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// JTI replay cache
-// ---------------------------------------------------------------------------
-
-// jtiCache prevents assertion replay by tracking seen JTI values.
-type jtiCache struct {
-	mu      sync.Mutex
-	entries map[string]time.Time // jti -> expiration time
-}
-
-func newJTICache(ctx context.Context) *jtiCache {
-	c := &jtiCache{entries: make(map[string]time.Time)}
-	go c.cleanup(ctx)
-	return c
-}
-
-// Check returns true if the JTI has already been seen (replay detected).
-// If not previously seen, records it with the given expiration time.
-func (c *jtiCache) Check(jti string, exp time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, exists := c.entries[jti]; exists {
-		return true // replay
-	}
-	c.entries[jti] = exp
-	return false
-}
-
-func (c *jtiCache) cleanup(ctx context.Context) {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			c.mu.Lock()
-			for jti, exp := range c.entries {
-				if now.After(exp) {
-					delete(c.entries, jti)
-				}
-			}
-			c.mu.Unlock()
-		}
 	}
 }
 

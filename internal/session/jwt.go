@@ -158,6 +158,128 @@ func sign(data []byte, key crypto.Signer, alg string) ([]byte, error) {
 	}
 }
 
+const verifyClockSkew = 30 * time.Second
+
+// VerifyToken fully parses, verifies the signature, and validates claims of a
+// JWT issued by this Manager. Unlike a decode-only path, this ensures that
+// forged or expired tokens are rejected.
+func (m *Manager) VerifyToken(tokenStr string) (*Claims, error) {
+	parts := splitJWT(tokenStr)
+	if parts == nil {
+		return nil, fmt.Errorf("malformed JWT: expected 3 dot-separated parts")
+	}
+
+	// Decode and validate header.
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("decoding header: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Kid string `json:"kid"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return nil, fmt.Errorf("parsing header: %w", err)
+	}
+	if header.Alg != m.keys.Algorithm {
+		return nil, fmt.Errorf("algorithm mismatch: got %q, expected %q", header.Alg, m.keys.Algorithm)
+	}
+	if header.Kid != "" && header.Kid != m.keys.KID {
+		return nil, fmt.Errorf("kid mismatch: got %q, expected %q", header.Kid, m.keys.KID)
+	}
+
+	// Verify signature.
+	signingInput := []byte(parts[0] + "." + parts[1])
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("decoding signature: %w", err)
+	}
+	if err := verifySignature(signingInput, sigBytes, m.keys.PublicKey, m.keys.Algorithm); err != nil {
+		return nil, fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	// Decode and validate claims.
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("decoding payload: %w", err)
+	}
+	var claims Claims
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil, fmt.Errorf("parsing claims: %w", err)
+	}
+
+	now := time.Now()
+	if claims.Exp == 0 || now.After(time.Unix(claims.Exp, 0).Add(verifyClockSkew)) {
+		return nil, fmt.Errorf("token expired")
+	}
+	if claims.Nbf != 0 && now.Before(time.Unix(claims.Nbf, 0).Add(-verifyClockSkew)) {
+		return nil, fmt.Errorf("token not yet valid (nbf)")
+	}
+	if claims.Iss != m.cfg.Issuer {
+		return nil, fmt.Errorf("issuer mismatch: got %q, expected %q", claims.Iss, m.cfg.Issuer)
+	}
+	if claims.Aud != m.cfg.Audience {
+		return nil, fmt.Errorf("audience mismatch: got %q, expected %q", claims.Aud, m.cfg.Audience)
+	}
+
+	return &claims, nil
+}
+
+func splitJWT(s string) []string {
+	parts := [3]string{}
+	for i := 0; i < 3; i++ {
+		if i < 2 {
+			idx := indexOf(s, '.')
+			if idx < 0 {
+				return nil
+			}
+			parts[i] = s[:idx]
+			s = s[idx+1:]
+		} else {
+			if s == "" {
+				return nil
+			}
+			parts[i] = s
+		}
+	}
+	return parts[:]
+}
+
+func indexOf(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+func verifySignature(signingInput, signature []byte, pub crypto.PublicKey, alg string) error {
+	switch alg {
+	case "RS256":
+		rsaPub, ok := pub.(*rsa.PublicKey)
+		if !ok {
+			return fmt.Errorf("expected RSA public key, got %T", pub)
+		}
+		h := crypto.SHA256.New()
+		h.Write(signingInput)
+		return rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, h.Sum(nil), signature)
+
+	case "EdDSA":
+		edPub, ok := pub.(ed25519.PublicKey)
+		if !ok {
+			return fmt.Errorf("expected Ed25519 public key, got %T", pub)
+		}
+		if !ed25519.Verify(edPub, signingInput, signature) {
+			return fmt.Errorf("Ed25519 signature invalid")
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unsupported algorithm: %s", alg)
+	}
+}
+
 // rsaSign signs with PKCS1v15 for RS256.
 func rsaSign(data []byte, key *rsa.PrivateKey) ([]byte, error) {
 	h := crypto.SHA256.New()

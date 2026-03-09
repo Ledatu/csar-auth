@@ -35,6 +35,15 @@ cookie:
   secure: false
   same_site: "lax"
 
+# --- Redis (optional) ---
+# When configured, used for STS replay protection (preferred over Postgres).
+# Falls back to Postgres or in-memory if not set.
+#
+# redis:
+#   address: "localhost:6379"
+#   password: "${REDIS_PASSWORD}"
+#   db: 0
+
 # --- STS: Service Token Exchange (optional) ---
 # Enables service-to-service authentication via signed JWT assertions.
 # Each service account gets a key pair; the public key is registered here.
@@ -47,6 +56,7 @@ cookie:
 #     first-sa:
 #       public_key_file: "/etc/csar-auth/keys/first-sa.pub"
 #       allowed_audiences: ["first"]
+#       allow_all_audiences: false  # UNSAFE for production with >1 audience; prefer explicit per-request audience
 #       token_ttl: "1h"
 #     second-sa:
 #       public_key_file: "/etc/csar-auth/keys/second-sa.pub"

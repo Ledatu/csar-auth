@@ -69,6 +69,11 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// Pool returns the underlying pgxpool.Pool for shared use by other components.
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
 // --- User operations ---
 
 func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (*store.User, error) {

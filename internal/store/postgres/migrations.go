@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS oauth_accounts (
 CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user_id ON oauth_accounts (user_id);
 `,
 	},
+	{
+		name: "002_sts_jti_log",
+		up: `
+CREATE TABLE IF NOT EXISTS sts_jti_log (
+    jti        TEXT PRIMARY KEY,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sts_jti_log_expires_at ON sts_jti_log (expires_at);
+`,
+	},
 }
 
 // runMigrations creates a migrations tracking table and applies pending migrations.

@@ -2,9 +2,7 @@
 package handler
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -97,16 +95,21 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the JWT to extract the user ID.
-	// We trust our own tokens — just decode the payload.
-	claims, err := decodeJWTPayload(cookie.Value)
+	claims, err := h.sessionMgr.VerifyToken(cookie.Value)
+	if err != nil {
+		h.logger.Warn("invalid session token on /auth/me", "error", err)
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := uuid.Parse(claims.Sub)
 	if err != nil {
 		http.Error(w, "invalid session", http.StatusUnauthorized)
 		return
 	}
 
 	// Fetch the full user from the store.
-	user, err := h.store.GetUserByID(r.Context(), claims.Sub)
+	user, err := h.store.GetUserByID(r.Context(), userID)
 	if err != nil {
 		h.logger.Error("failed to fetch user for /me", "user_id", claims.Sub, "error", err)
 		http.Error(w, "user not found", http.StatusNotFound)
@@ -155,48 +158,6 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
-}
-
-// decodeJWTPayload extracts claims from a JWT without verification.
-// This is safe because we only call it on cookies we issued ourselves.
-func decodeJWTPayload(tokenStr string) (*jwtClaims, error) {
-	parts := strings.SplitN(tokenStr, ".", 3)
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("malformed JWT")
-	}
-
-	payload, err := base64RawURLDecode(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("decoding payload: %w", err)
-	}
-
-	var claims jwtClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, fmt.Errorf("parsing claims: %w", err)
-	}
-	if err := claims.parse(); err != nil {
-		return nil, err
-	}
-
-	return &claims, nil
-}
-
-type jwtClaims struct {
-	Sub uuid.UUID `json:"-"`
-	RawSub string `json:"sub"`
-}
-
-func (c *jwtClaims) parse() error {
-	id, err := uuid.Parse(c.RawSub)
-	if err != nil {
-		return fmt.Errorf("invalid sub claim: %w", err)
-	}
-	c.Sub = id
-	return nil
-}
-
-func base64RawURLDecode(s string) ([]byte, error) {
-	return base64.RawURLEncoding.DecodeString(s)
 }
 
 func parseSameSite(s string) http.SameSite {

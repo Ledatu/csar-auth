@@ -23,6 +23,8 @@ import (
 	"github.com/Ledatu/csar-auth/internal/store"
 	"github.com/Ledatu/csar-auth/internal/store/postgres"
 	"github.com/Ledatu/csar-auth/internal/sts"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -100,11 +102,28 @@ func run(configPath string, logger *slog.Logger) error {
 	// Initialize STS handler (optional).
 	var stsHandler *sts.Handler
 	if cfg.STS.Enabled {
-		stsHandler, err = sts.New(cfg.STS, cfg.JWT, sessionMgr, logger)
+		var replayStore sts.ReplayStore
+		if cfg.Redis != nil && cfg.Redis.Address != "" {
+			redisClient := redis.NewClient(&redis.Options{
+				Addr:     cfg.Redis.Address,
+				Password: cfg.Redis.Password,
+				DB:       cfg.Redis.DB,
+			})
+			defer redisClient.Close()
+			if err := redisClient.Ping(ctx).Err(); err != nil {
+				return fmt.Errorf("connecting to redis: %w", err)
+			}
+			replayStore = sts.NewRedisReplayStore(redisClient)
+			logger.Info("STS replay protection: redis", "address", cfg.Redis.Address)
+		} else if pgStore, ok := st.(*postgres.Store); ok {
+			replayStore = sts.NewPostgresReplayStore(pgStore.Pool())
+			logger.Info("STS replay protection: postgres")
+		}
+
+		stsHandler, err = sts.New(cfg.STS, cfg.JWT, sessionMgr, replayStore, logger)
 		if err != nil {
 			return fmt.Errorf("initializing STS: %w", err)
 		}
-		defer stsHandler.Stop()
 		logger.Info("STS enabled", "service_accounts", len(cfg.STS.ServiceAccounts))
 	}
 

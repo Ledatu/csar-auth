@@ -19,6 +19,7 @@ type Config struct {
 	JWT         JWTConfig      `yaml:"jwt"`
 	OAuth       OAuthConfig    `yaml:"oauth"`
 	Cookie      CookieConfig   `yaml:"cookie"`
+	Redis       *RedisConfig   `yaml:"redis,omitempty"`
 	STS         STSConfig      `yaml:"sts,omitempty"`
 }
 
@@ -31,10 +32,11 @@ type STSConfig struct {
 
 // ServiceAccountConfig defines a single service account for STS token exchange.
 type ServiceAccountConfig struct {
-	PublicKeyFile    string   `yaml:"public_key_file"`    // path to PEM public key
-	PublicKey        string   `yaml:"public_key"`         // OR inline PEM
-	AllowedAudiences []string `yaml:"allowed_audiences"`  // e.g. ["balance"]
-	TokenTTL         Duration `yaml:"token_ttl"`          // default: inherits jwt.ttl
+	PublicKeyFile     string   `yaml:"public_key_file"`      // path to PEM public key
+	PublicKey         string   `yaml:"public_key"`           // OR inline PEM
+	AllowedAudiences  []string `yaml:"allowed_audiences"`    // e.g. ["balance"]
+	AllowAllAudiences bool     `yaml:"allow_all_audiences"`  // if true, audience param is optional and defaults to all allowed
+	TokenTTL          Duration `yaml:"token_ttl"`            // default: inherits jwt.ttl
 }
 
 // DatabaseConfig selects the storage backend.
@@ -76,6 +78,13 @@ type CookieConfig struct {
 	Domain   string `yaml:"domain"`
 	Secure   bool   `yaml:"secure"`
 	SameSite string `yaml:"same_site"` // "lax", "strict", "none"
+}
+
+// RedisConfig configures an optional Redis connection.
+type RedisConfig struct {
+	Address  string `yaml:"address"`  // e.g. "localhost:6379"
+	Password string `yaml:"password"` // optional AUTH password
+	DB       int    `yaml:"db"`       // database number, default 0
 }
 
 // Duration wraps time.Duration for YAML unmarshalling from strings like "24h".
@@ -241,5 +250,10 @@ func expandEnvInConfig(cfg *Config) {
 		sa.PublicKeyFile = expandEnv(sa.PublicKeyFile)
 		sa.PublicKey = expandEnv(sa.PublicKey)
 		cfg.STS.ServiceAccounts[name] = sa
+	}
+
+	if cfg.Redis != nil {
+		cfg.Redis.Address = expandEnv(cfg.Redis.Address)
+		cfg.Redis.Password = expandEnv(cfg.Redis.Password)
 	}
 }
