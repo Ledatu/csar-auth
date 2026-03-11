@@ -138,8 +138,19 @@ func run(p configsource.SourceParams, refreshInterval string, logger *slog.Logge
 		}
 	}
 
+	// Optional authz client for permissions endpoints.
+	var authzClient *handler.AuthzClient
+	if cfg.Authz.Enabled {
+		authzClient, err = handler.NewAuthzClient(cfg.Authz.Endpoint, cfg.Authz.TLS, logger.With("component", "authz_client"))
+		if err != nil {
+			return fmt.Errorf("connecting to authz service: %w", err)
+		}
+		defer authzClient.Close()
+		logger.Info("authz client connected", "endpoint", cfg.Authz.Endpoint)
+	}
+
 	mux := http.NewServeMux()
-	h := handler.New(st, sessionMgr, oauthMgr, stsHandler, logger, cfg)
+	h := handler.New(st, sessionMgr, oauthMgr, stsHandler, authzClient, logger, cfg)
 	h.RegisterRoutes(mux)
 
 	srv := &http.Server{

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ledatu/csar-authn/internal/store"
+	"github.com/ledatu/csar-core/pgutil"
 )
 
 // Store implements store.Store backed by PostgreSQL.
@@ -32,28 +33,18 @@ func WithLogger(l *slog.Logger) Option {
 
 // New creates a new PostgreSQL store and verifies the connection.
 func New(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
-	poolCfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("parsing dsn: %w", err)
-	}
-
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		return nil, fmt.Errorf("creating pool: %w", err)
-	}
-
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("pinging database: %w", err)
-	}
-
 	s := &Store{
-		pool:   pool,
 		logger: slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	pool, err := pgutil.NewPool(ctx, dsn, pgutil.WithLogger(s.logger))
+	if err != nil {
+		return nil, err
+	}
+	s.pool = pool
 
 	return s, nil
 }
@@ -82,7 +73,7 @@ func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (*store.User, err
 		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
 		 FROM users WHERE id = $1`, id,
 	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
@@ -97,7 +88,7 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (*store.User, 
 		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
 		 FROM users WHERE lower(email) = lower($1)`, email,
 	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
@@ -112,7 +103,7 @@ func (s *Store) GetUserByPhone(ctx context.Context, phone string) (*store.User, 
 		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
 		 FROM users WHERE phone = $1`, phone,
 	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
@@ -171,7 +162,7 @@ func (s *Store) GetOAuthAccount(ctx context.Context, provider, providerUserID st
 		provider, providerUserID,
 	).Scan(&a.Provider, &a.ProviderUserID, &a.UserID, &a.Email, &a.DisplayName, &a.AvatarURL,
 		&a.AccessToken, &a.RefreshToken, &a.ExpiresAt, &a.EmailVerified, &a.LinkedAt, &a.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
@@ -310,7 +301,7 @@ func (s *Store) FindOrCreateUser(ctx context.Context, acct *store.OAuthAccount, 
 			}
 			// Unverified email — don't block yet, fall through to phone match.
 			unverifiedEmailConflict = true
-		} else if !errors.Is(err, pgx.ErrNoRows) {
+		} else if !pgutil.IsNotFound(err) {
 			return nil, 0, fmt.Errorf("looking up user by email: %w", err)
 		}
 	}
@@ -332,7 +323,7 @@ func (s *Store) FindOrCreateUser(ctx context.Context, acct *store.OAuthAccount, 
 			}
 			return &user, store.ResultLinkedToExisting, nil
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if !pgutil.IsNotFound(err) {
 			return nil, 0, fmt.Errorf("looking up user by phone: %w", err)
 		}
 	}

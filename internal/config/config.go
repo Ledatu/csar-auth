@@ -21,6 +21,14 @@ type Config struct {
 	Cookie      CookieConfig   `yaml:"cookie"`
 	Redis       *RedisConfig   `yaml:"redis,omitempty"`
 	STS         STSConfig      `yaml:"sts,omitempty"`
+	Authz       AuthzConfig    `yaml:"authz,omitempty"`
+}
+
+// AuthzConfig configures the connection to csar-authz for permissions endpoints.
+type AuthzConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Endpoint string `yaml:"endpoint"` // gRPC address, e.g. "localhost:9090"
+	TLS      bool   `yaml:"tls"`
 }
 
 // STSConfig controls the Security Token Service for service-to-service auth.
@@ -232,4 +240,6 @@ func expandEnvInConfig(cfg *Config) {
 		cfg.Redis.Address = expandEnv(cfg.Redis.Address)
 		cfg.Redis.Password = expandEnv(cfg.Redis.Password)
 	}
+
+	cfg.Authz.Endpoint = expandEnv(cfg.Authz.Endpoint)
 }

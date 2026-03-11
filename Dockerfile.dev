@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# Build context: parent directory (_csar/) for replace directive resolution.
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /src
+
+COPY csar-core/ ./csar-core/
+COPY csar-proto/ ./csar-proto/
+
+COPY csar-authn/go.mod csar-authn/go.sum ./csar-authn/
+WORKDIR /src/csar-authn
+RUN go mod download
+
+WORKDIR /src
+COPY csar-authn/ ./csar-authn/
+WORKDIR /src/csar-authn
+RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o /csar-authn ./cmd/csar-authn
+
+# ---
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+RUN adduser -D -u 10001 csar
+COPY --from=builder /csar-authn /usr/local/bin/csar-authn
+USER csar
+ENTRYPOINT ["csar-authn"]

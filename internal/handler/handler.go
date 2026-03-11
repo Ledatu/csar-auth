@@ -19,24 +19,26 @@ import (
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	store      store.Store
-	sessionMgr *session.Manager
-	oauthMgr   *oauth.Manager
-	stsHandler *sts.Handler // nil when STS is not configured
-	logger     *slog.Logger
-	cfg        *config.Config
+	store       store.Store
+	sessionMgr  *session.Manager
+	oauthMgr    *oauth.Manager
+	stsHandler  *sts.Handler  // nil when STS is not configured
+	authzClient *AuthzClient  // nil when authz is not configured
+	logger      *slog.Logger
+	cfg         *config.Config
 }
 
 // New creates a Handler with all dependencies.
-// stsHandler may be nil when STS is not enabled.
-func New(st store.Store, sessionMgr *session.Manager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, logger *slog.Logger, cfg *config.Config) *Handler {
+// stsHandler and authzClient may be nil when their features are not enabled.
+func New(st store.Store, sessionMgr *session.Manager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, logger *slog.Logger, cfg *config.Config) *Handler {
 	return &Handler{
-		store:      st,
-		sessionMgr: sessionMgr,
-		oauthMgr:   oauthMgr,
-		stsHandler: stsHandler,
-		logger:     logger,
-		cfg:        cfg,
+		store:       st,
+		sessionMgr:  sessionMgr,
+		oauthMgr:    oauthMgr,
+		stsHandler:  stsHandler,
+		authzClient: authzClient,
+		logger:      logger,
+		cfg:         cfg,
 	}
 }
 
@@ -76,6 +78,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// STS token exchange: POST /sts/token (optional).
 	if h.stsHandler != nil {
 		mux.Handle("POST /sts/token", h.stsHandler)
+	}
+
+	// Permissions endpoints (optional, requires authz service).
+	if h.authzClient != nil {
+		mux.HandleFunc("GET /auth/me/permissions", h.handlePermissions)
+		mux.HandleFunc("GET /auth/me/check", h.handleCheck)
 	}
 }
 

@@ -2,19 +2,14 @@ package postgres
 
 import (
 	"context"
-	"fmt"
+
+	"github.com/ledatu/csar-core/pgutil"
 )
 
-// migration holds a single schema migration step.
-type migration struct {
-	name string
-	up   string
-}
-
-var migrations = []migration{
+var migrations = []pgutil.Migration{
 	{
-		name: "001_initial",
-		up: `
+		Name: "001_initial",
+		Up: `
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS users (
@@ -47,8 +42,8 @@ CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user_id ON oauth_accounts (user_id
 `,
 	},
 	{
-		name: "002_sts_jti_log",
-		up: `
+		Name: "002_sts_jti_log",
+		Up: `
 CREATE TABLE IF NOT EXISTS sts_jti_log (
     jti        TEXT PRIMARY KEY,
     expires_at TIMESTAMPTZ NOT NULL
@@ -58,22 +53,22 @@ CREATE INDEX IF NOT EXISTS idx_sts_jti_log_expires_at ON sts_jti_log (expires_at
 `,
 	},
 	{
-		name: "003_sts_jti_log_add_issuer",
-		up: `
+		Name: "003_sts_jti_log_add_issuer",
+		Up: `
 ALTER TABLE sts_jti_log ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT '';
 ALTER TABLE sts_jti_log DROP CONSTRAINT IF EXISTS sts_jti_log_pkey;
 ALTER TABLE sts_jti_log ADD PRIMARY KEY (issuer, jti);
 `,
 	},
 	{
-		name: "004_account_linking",
-		up: `
+		Name: "004_account_linking",
+		Up: `
 ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
 `,
 	},
 	{
-		name: "005_telegram_support",
-		up: `
+		Name: "005_telegram_support",
+		Up: `
 ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
 DROP INDEX IF EXISTS idx_users_email_lower;
@@ -83,54 +78,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users (phone) WHERE phone I
 	},
 }
 
-// runMigrations creates a migrations tracking table and applies pending migrations.
+// runMigrations applies pending schema migrations using the shared runner.
 func (s *Store) runMigrations(ctx context.Context) error {
-	// Create migrations tracking table.
-	_, err := s.pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			name       TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("creating migrations table: %w", err)
-	}
-
-	for _, m := range migrations {
-		// Check if already applied.
-		var exists bool
-		err := s.pool.QueryRow(ctx,
-			"SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = $1)", m.name,
-		).Scan(&exists)
-		if err != nil {
-			return fmt.Errorf("checking migration %s: %w", m.name, err)
-		}
-		if exists {
-			continue
-		}
-
-		// Apply migration in a transaction.
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning migration %s: %w", m.name, err)
-		}
-
-		if _, err := tx.Exec(ctx, m.up); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("applying migration %s: %w", m.name, err)
-		}
-
-		if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations (name) VALUES ($1)", m.name); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("recording migration %s: %w", m.name, err)
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("committing migration %s: %w", m.name, err)
-		}
-
-		s.logger.Info("applied migration", "name", m.name)
-	}
-
-	return nil
+	return pgutil.RunMigrations(ctx, s.pool, "schema_migrations", migrations, s.logger)
 }
