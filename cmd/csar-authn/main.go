@@ -153,7 +153,7 @@ func run(
 	// Optional authz client for permissions endpoints.
 	var authzClient *handler.AuthzClient
 	if cfg.Authz.Enabled {
-		authzClient, err = handler.NewAuthzClient(cfg.Authz.Endpoint, cfg.Authz.TLS, logger.With("component", "authz_client"))
+		authzClient, err = handler.NewAuthzClient(cfg.Authz.Endpoint, cfg.Authz.TLS, logger.With("component", "authz-client"))
 		if err != nil {
 			return fmt.Errorf("connecting to authz service: %w", err)
 		}

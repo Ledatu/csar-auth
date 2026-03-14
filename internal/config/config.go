@@ -30,9 +30,20 @@ type Config struct {
 
 // AuthzConfig configures the connection to csar-authz for permissions endpoints.
 type AuthzConfig struct {
+	Enabled  bool           `yaml:"enabled"`
+	Endpoint string         `yaml:"endpoint"` // gRPC address, e.g. "localhost:9090"
+	TLS      AuthzTLSConfig `yaml:"tls"`
+}
+
+// AuthzTLSConfig controls TLS for the authn -> authz gRPC connection.
+// When Enabled is true and no CA/cert files are set, system roots are used
+// with no client certificate (simple TLS). Provide CAFile for custom CA
+// verification, and CertFile+KeyFile for mutual TLS.
+type AuthzTLSConfig struct {
 	Enabled  bool   `yaml:"enabled"`
-	Endpoint string `yaml:"endpoint"` // gRPC address, e.g. "localhost:9090"
-	TLS      bool   `yaml:"tls"`
+	CAFile   string `yaml:"ca_file,omitempty"`
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
 }
 
 // STSConfig controls the Security Token Service for service-to-service auth.
@@ -258,4 +269,7 @@ func expandEnvInConfig(cfg *Config) {
 	}
 
 	cfg.Authz.Endpoint = expandEnv(cfg.Authz.Endpoint)
+	cfg.Authz.TLS.CAFile = expandEnv(cfg.Authz.TLS.CAFile)
+	cfg.Authz.TLS.CertFile = expandEnv(cfg.Authz.TLS.CertFile)
+	cfg.Authz.TLS.KeyFile = expandEnv(cfg.Authz.TLS.KeyFile)
 }

@@ -3,12 +3,16 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/ledatu/csar-authn/internal/config"
+	"github.com/ledatu/csar-core/tlsx"
 	pb "github.com/ledatu/csar-proto/csar/authz/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -20,10 +24,22 @@ type AuthzClient struct {
 }
 
 // NewAuthzClient connects to csar-authz at the given endpoint.
-func NewAuthzClient(endpoint string, useTLS bool, logger *slog.Logger) (*AuthzClient, error) {
+// When tlsCfg.Enabled is true it establishes a TLS (optionally mTLS) connection;
+// otherwise plaintext gRPC is used.
+func NewAuthzClient(endpoint string, tlsCfg config.AuthzTLSConfig, logger *slog.Logger) (*AuthzClient, error) {
 	var opts []grpc.DialOption
-	if !useTLS {
+	if !tlsCfg.Enabled {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		tc, err := tlsx.NewClientTLSConfig(tlsx.ClientConfig{
+			CAFile:   tlsCfg.CAFile,
+			CertFile: tlsCfg.CertFile,
+			KeyFile:  tlsCfg.KeyFile,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("building authz TLS config: %w", err)
+		}
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
 	}
 
 	conn, err := grpc.NewClient(endpoint, opts...)
