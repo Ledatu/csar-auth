@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -433,7 +432,9 @@ func TestSTSIssuedTokenClaims(t *testing.T) {
 	}
 
 	var resp tokenResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding success response: %v", err)
+	}
 
 	// Decode issued token payload (without verification, just for claim inspection).
 	parts := strings.SplitN(resp.AccessToken, ".", 3)
@@ -464,16 +465,6 @@ func TestSTSIssuedTokenClaims(t *testing.T) {
 	}
 }
 
-// encodePEM is a test helper for PEM encoding.
-func encodePEM(t *testing.T, pub ed25519.PublicKey) string {
-	t.Helper()
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshalling public key: %v", err)
-	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
-}
-
 func TestSTSAllowAllAudiences(t *testing.T) {
 	te := newTestEnv(t)
 	// Enable AllowAllAudiences on the test SA.
@@ -490,12 +481,16 @@ func TestSTSAllowAllAudiences(t *testing.T) {
 	}
 
 	var resp tokenResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding success response: %v", err)
+	}
 
 	parts := strings.SplitN(resp.AccessToken, ".", 3)
 	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
 	var stsClaims session.STSClaims
-	json.Unmarshal(payload, &stsClaims)
+	if err := json.Unmarshal(payload, &stsClaims); err != nil {
+		t.Fatalf("decoding issued token claims: %v", err)
+	}
 
 	if len(stsClaims.Aud) != 2 {
 		t.Errorf("expected 2 audiences, got %d: %v", len(stsClaims.Aud), stsClaims.Aud)
@@ -542,8 +537,12 @@ func TestSTSGenericErrorNoEnumeration(t *testing.T) {
 	}
 
 	var errUnknown, errBadSig errorResponse
-	json.Unmarshal(wUnknown.Body.Bytes(), &errUnknown)
-	json.Unmarshal(wBadSig.Body.Bytes(), &errBadSig)
+	if err := json.Unmarshal(wUnknown.Body.Bytes(), &errUnknown); err != nil {
+		t.Fatalf("decoding unknown SA error response: %v", err)
+	}
+	if err := json.Unmarshal(wBadSig.Body.Bytes(), &errBadSig); err != nil {
+		t.Fatalf("decoding bad sig error response: %v", err)
+	}
 
 	if errUnknown.Error != errBadSig.Error {
 		t.Errorf("error codes differ: unknown=%q bad_sig=%q", errUnknown.Error, errBadSig.Error)

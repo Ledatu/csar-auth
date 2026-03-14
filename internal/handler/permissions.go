@@ -138,7 +138,7 @@ func (h *Handler) handlePermissions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=60")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleCheck performs a single access check for the authenticated user.
@@ -174,7 +174,7 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=60")
-	json.NewEncoder(w).Encode(checkResponse{
+	_ = json.NewEncoder(w).Encode(checkResponse{
 		Allowed:      resp.Allowed,
 		MatchedRoles: resp.MatchedRoles,
 	})
@@ -196,7 +196,7 @@ func (h *Handler) extractSubject(r *http.Request) string {
 	}
 
 	// Fall back to session cookie.
-	cookie, err := r.Cookie(h.cfg.Cookie.Name)
+	cookie, err := r.Cookie(h.cfg.Load().Cookie.Name)
 	if err != nil {
 		return ""
 	}

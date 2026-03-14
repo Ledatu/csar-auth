@@ -98,7 +98,7 @@ func run(
 	if err != nil {
 		return fmt.Errorf("initializing tracer: %w", err)
 	}
-	defer tp.Close()
+	defer func() { _ = tp.Close() }()
 
 	reg := observe.NewRegistry()
 
@@ -114,7 +114,7 @@ func run(
 	default:
 		return fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	if err := st.Migrate(ctx); err != nil {
 		return fmt.Errorf("running migrations: %w", err)
@@ -157,7 +157,7 @@ func run(
 		if err != nil {
 			return fmt.Errorf("connecting to authz service: %w", err)
 		}
-		defer authzClient.Close()
+		defer func() { _ = authzClient.Close() }()
 		logger.Info("authz client connected", "endpoint", cfg.Authz.Endpoint)
 	}
 
@@ -197,18 +197,36 @@ func run(
 		if err != nil {
 			return fmt.Errorf("building config source for watcher: %w", err)
 		}
-		validate := func(data []byte) error {
-			_, err := config.LoadFromBytes(data)
-			return err
+
+		watchLogger := logger.With("component", "config_watcher")
+		applyFn := func(_ context.Context, data []byte) (bool, error) {
+			newCfg, err := config.LoadFromBytes(data)
+			if err != nil {
+				return false, err
+			}
+
+			if err := oauthMgr.Reload(newCfg); err != nil {
+				return false, fmt.Errorf("reloading oauth providers: %w", err)
+			}
+
+			if stsHandler != nil {
+				if err := stsHandler.Reload(newCfg.STS, newCfg.JWT); err != nil {
+					return false, fmt.Errorf("reloading STS accounts: %w", err)
+				}
+			}
+
+			h.SetConfig(newCfg)
+
+			watchLogger.Info("config reloaded",
+				"providers", len(newCfg.OAuth.Providers),
+				"sts_accounts", len(newCfg.STS.ServiceAccounts),
+			)
+			return true, nil
 		}
-		watcher := configload.NewValidatingWatcher(
-			src,
-			logger.With("component", "config_watcher"),
-			validate,
-			sf.WatcherOptions()...,
-		)
+
+		watcher := configsource.NewConfigWatcher(src, applyFn, watchLogger, sf.WatcherOptions()...)
 		go watcher.RunPeriodicWatch(ctx, interval)
-		logger.Info("config watcher started (validation-only; config changes require restart)", "interval", interval)
+		logger.Info("config watcher started", "interval", interval)
 	}
 
 	// --- Metrics sidecar ---

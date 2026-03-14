@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ledatu/csar-authn/internal/config"
@@ -33,20 +34,63 @@ type serviceAccount struct {
 }
 
 // Handler handles STS token exchange requests (POST /sts/token).
+// Fields guarded by mu (accounts, assertionMaxAge) may be swapped at
+// runtime via Reload without restarting the service.
 type Handler struct {
+	mu              sync.RWMutex
 	accounts        map[string]*serviceAccount // keyed by SA name
-	sessionMgr      *session.Manager
-	replayStore     ReplayStore
 	assertionMaxAge time.Duration
-	defaultTTL      time.Duration // from jwt.ttl
-	issuer          string        // expected "aud" in incoming assertions
-	logger          *slog.Logger
+
+	sessionMgr  *session.Manager
+	replayStore ReplayStore
+	defaultTTL  time.Duration // from jwt.ttl
+	issuer      string        // expected "aud" in incoming assertions
+	logger      *slog.Logger
 }
 
 // New creates an STS handler, loading all service account public keys.
 // If replayStore is nil, a local in-memory replay store is used as fallback.
 // Returns an error if any key fails to load (fail-fast).
 func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.Manager, replayStore ReplayStore, logger *slog.Logger) (*Handler, error) {
+	accounts, err := buildAccounts(stsCfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	if replayStore == nil {
+		replayStore = NewMemoryReplayStore()
+		logger.Warn("STS using in-memory replay store; not suitable for multi-instance production")
+	}
+
+	return &Handler{
+		accounts:        accounts,
+		sessionMgr:      sessionMgr,
+		replayStore:     replayStore,
+		assertionMaxAge: stsCfg.AssertionMaxAge.Std(),
+		defaultTTL:      jwtCfg.TTL.Std(),
+		issuer:          jwtCfg.Issuer,
+		logger:          logger,
+	}, nil
+}
+
+// Reload atomically replaces service accounts and timing config.
+// The replay store, session manager, and signing keys are preserved.
+// On error the previous accounts remain active.
+func (h *Handler) Reload(stsCfg config.STSConfig, jwtCfg config.JWTConfig) error {
+	accounts, err := buildAccounts(stsCfg, h.logger)
+	if err != nil {
+		return err
+	}
+
+	h.mu.Lock()
+	h.accounts = accounts
+	h.assertionMaxAge = stsCfg.AssertionMaxAge.Std()
+	h.mu.Unlock()
+	return nil
+}
+
+// buildAccounts loads all service account public keys from config.
+func buildAccounts(stsCfg config.STSConfig, logger *slog.Logger) (map[string]*serviceAccount, error) {
 	accounts := make(map[string]*serviceAccount, len(stsCfg.ServiceAccounts))
 
 	for name, saCfg := range stsCfg.ServiceAccounts {
@@ -79,20 +123,7 @@ func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.M
 		)
 	}
 
-	if replayStore == nil {
-		replayStore = NewMemoryReplayStore()
-		logger.Warn("STS using in-memory replay store; not suitable for multi-instance production")
-	}
-
-	return &Handler{
-		accounts:        accounts,
-		sessionMgr:      sessionMgr,
-		replayStore:     replayStore,
-		assertionMaxAge: stsCfg.AssertionMaxAge.Std(),
-		defaultTTL:      jwtCfg.TTL.Std(),
-		issuer:          jwtCfg.Issuer,
-		logger:          logger,
-	}, nil
+	return accounts, nil
 }
 
 // ServeHTTP handles POST /sts/token requests.
@@ -127,8 +158,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up the service account.
+	// Snapshot mutable fields under read lock.
+	h.mu.RLock()
 	sa, ok := h.accounts[issuer]
+	assertionMaxAge := h.assertionMaxAge
+	h.mu.RUnlock()
+
 	if !ok {
 		h.logger.Warn("unknown service account", "sa", issuer)
 		writeError(w, http.StatusUnauthorized, "invalid_grant", "authentication failed")
@@ -154,16 +189,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	assertionAge := time.Since(iatTime)
-	if assertionAge > h.assertionMaxAge+clockSkew {
+	if assertionAge > assertionMaxAge+clockSkew {
 		writeError(w, http.StatusUnauthorized, "invalid_grant", "assertion too old")
 		return
 	}
 	lifetime := time.Duration(claims.Exp-claims.Iat) * time.Second
-	if lifetime <= 0 || lifetime > h.assertionMaxAge {
+	if lifetime <= 0 || lifetime > assertionMaxAge {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "assertion lifetime out of bounds")
 		return
 	}
-	maxExp := time.Now().Add(h.assertionMaxAge + clockSkew)
+	maxExp := time.Now().Add(assertionMaxAge + clockSkew)
 	if time.Unix(claims.Exp, 0).After(maxExp) {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "assertion exp too far in the future")
 		return
@@ -229,7 +264,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	json.NewEncoder(w).Encode(tokenResponse{
+	_ = json.NewEncoder(w).Encode(tokenResponse{
 		AccessToken: token,
 		TokenType:   "Bearer",
 		ExpiresIn:   int(ttl.Seconds()),
@@ -375,7 +410,7 @@ type errorResponse struct {
 func writeError(w http.ResponseWriter, status int, errCode, description string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(errorResponse{
+	_ = json.NewEncoder(w).Encode(errorResponse{
 		Error:       errCode,
 		Description: description,
 	})

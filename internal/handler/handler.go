@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -18,6 +19,8 @@ import (
 )
 
 // Handler holds dependencies for HTTP handlers.
+// cfg is stored behind an atomic pointer so config changes are visible to
+// request handlers without restarting the service.
 type Handler struct {
 	store       store.Store
 	sessionMgr  *session.Manager
@@ -25,26 +28,38 @@ type Handler struct {
 	stsHandler  *sts.Handler  // nil when STS is not configured
 	authzClient *AuthzClient  // nil when authz is not configured
 	logger      *slog.Logger
-	cfg         *config.Config
+	cfg         atomic.Pointer[config.Config]
 }
 
 // New creates a Handler with all dependencies.
 // stsHandler and authzClient may be nil when their features are not enabled.
 func New(st store.Store, sessionMgr *session.Manager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, logger *slog.Logger, cfg *config.Config) *Handler {
-	return &Handler{
+	h := &Handler{
 		store:       st,
 		sessionMgr:  sessionMgr,
 		oauthMgr:    oauthMgr,
 		stsHandler:  stsHandler,
 		authzClient: authzClient,
 		logger:      logger,
-		cfg:         cfg,
 	}
+	h.cfg.Store(cfg)
+	return h
+}
+
+// SetConfig atomically replaces the active configuration.
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.cfg.Store(cfg)
+}
+
+// Config returns the current configuration snapshot.
+func (h *Handler) Config() *config.Config {
+	return h.cfg.Load()
 }
 
 // RegisterRoutes sets up all HTTP routes on the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	cookieSameSite := httpx.ParseSameSite(h.cfg.Cookie.SameSite)
+	cfg := h.cfg.Load()
+	cookieSameSite := httpx.ParseSameSite(cfg.Cookie.SameSite)
 
 	// OAuth login initiation: GET /auth/{provider}
 	mux.Handle("GET /auth/{provider}", h.oauthMgr.BeginAuthHandler())
@@ -54,8 +69,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		h.store,
 		h.sessionMgr,
 		h.oauthMgr,
-		h.cfg.Cookie.Name,
-		h.cfg.Cookie.Secure,
+		cfg.Cookie.Name,
+		cfg.Cookie.Secure,
 		cookieSameSite,
 		h.logger,
 	))
@@ -85,20 +100,22 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg.Load()
 	http.SetCookie(w, &http.Cookie{
-		Name:     h.cfg.Cookie.Name,
+		Name:     cfg.Cookie.Name,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   h.cfg.Cookie.Secure,
-		SameSite: httpx.ParseSameSite(h.cfg.Cookie.SameSite),
+		Secure:   cfg.Cookie.Secure,
+		SameSite: httpx.ParseSameSite(cfg.Cookie.SameSite),
 		MaxAge:   -1, // delete immediately
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(h.cfg.Cookie.Name)
+	cfg := h.cfg.Load()
+	cookie, err := r.Cookie(cfg.Cookie.Name)
 	if err != nil {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
 		return
@@ -165,11 +182,12 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(h.cfg.Cookie.Name)
+	cfg := h.cfg.Load()
+	cookie, err := r.Cookie(cfg.Cookie.Name)
 	if err != nil {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
 		return

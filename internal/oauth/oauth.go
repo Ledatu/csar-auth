@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
@@ -21,7 +22,9 @@ import (
 )
 
 // Manager manages OAuth providers and the Goth session store.
+// Fields guarded by mu may be swapped at runtime via Reload.
 type Manager struct {
+	mu               sync.RWMutex
 	logger           *slog.Logger
 	baseURL          string
 	frontendURL      string
@@ -30,14 +33,45 @@ type Manager struct {
 
 // NewManager initializes Goth providers from config and returns a Manager.
 func NewManager(cfg *config.Config, logger *slog.Logger) (*Manager, error) {
-	// Set up the session store for Goth's OAuth state cookie.
+	if err := applyGothProviders(cfg, logger); err != nil {
+		return nil, err
+	}
+
+	return &Manager{
+		logger:           logger,
+		baseURL:          cfg.BaseURL,
+		frontendURL:      cfg.FrontendURL,
+		trustedProviders: buildTrustedMap(cfg),
+	}, nil
+}
+
+// Reload re-initializes Goth providers and the trusted map from new config.
+// On error the previous provider set remains active.
+func (m *Manager) Reload(cfg *config.Config) error {
+	if err := applyGothProviders(cfg, m.logger); err != nil {
+		return err
+	}
+
+	trusted := buildTrustedMap(cfg)
+
+	m.mu.Lock()
+	m.trustedProviders = trusted
+	m.frontendURL = cfg.FrontendURL
+	m.baseURL = cfg.BaseURL
+	m.mu.Unlock()
+	return nil
+}
+
+// applyGothProviders sets up the Goth session store and registers all providers.
+func applyGothProviders(cfg *config.Config, logger *slog.Logger) error {
 	store := sessions.NewCookieStore([]byte(cfg.OAuth.SessionSecret))
-	store.MaxAge(300) // 5 minutes — just long enough for the OAuth round-trip
+	store.MaxAge(300)
 	store.Options.HttpOnly = true
 	store.Options.Secure = cfg.Cookie.Secure
 	store.Options.SameSite = httpx.ParseSameSite(cfg.Cookie.SameSite)
-
 	gothic.Store = store
+
+	goth.ClearProviders()
 
 	var providers []goth.Provider
 	for _, p := range cfg.OAuth.Providers {
@@ -45,40 +79,39 @@ func NewManager(cfg *config.Config, logger *slog.Logger) (*Manager, error) {
 		if callbackURL == "" {
 			callbackURL = fmt.Sprintf("%s/auth/%s/callback", cfg.BaseURL, p.Name)
 		}
-
 		provider, err := createProvider(p, callbackURL)
 		if err != nil {
-			return nil, fmt.Errorf("provider %s: %w", p.Name, err)
+			return fmt.Errorf("provider %s: %w", p.Name, err)
 		}
 		providers = append(providers, provider)
 		logger.Info("registered oauth provider", "name", p.Name, "callback", callbackURL)
 	}
-
 	goth.UseProviders(providers...)
+	return nil
+}
 
+func buildTrustedMap(cfg *config.Config) map[string]bool {
 	trusted := make(map[string]bool)
 	for _, p := range cfg.OAuth.Providers {
 		if p.Trusted {
 			trusted[strings.ToLower(p.Name)] = true
 		}
 	}
-
-	return &Manager{
-		logger:           logger,
-		baseURL:          cfg.BaseURL,
-		frontendURL:      cfg.FrontendURL,
-		trustedProviders: trusted,
-	}, nil
+	return trusted
 }
 
 // FrontendURL returns the configured frontend redirect target.
 func (m *Manager) FrontendURL() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.frontendURL
 }
 
 // IsTrusted returns whether the provider is configured as trusted
 // (i.e. always returns verified emails).
 func (m *Manager) IsTrusted(provider string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.trustedProviders[strings.ToLower(provider)]
 }
 

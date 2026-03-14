@@ -28,9 +28,15 @@ func (s *RedisReplayStore) CheckAndRecord(ctx context.Context, issuer, jti strin
 	if ttl <= 0 {
 		ttl = time.Second
 	}
-	ok, err := s.client.SetNX(ctx, s.keyPrefix+issuer+":"+jti, "1", ttl).Result()
+	err := s.client.SetArgs(ctx, s.keyPrefix+issuer+":"+jti, "1", redis.SetArgs{
+		TTL:  ttl,
+		Mode: "NX",
+	}).Err()
+	if err == redis.Nil {
+		return true, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return !ok, nil
+	return false, nil
 }
