@@ -65,11 +65,18 @@ type permissionEntry struct {
 	Resource string `json:"resource"`
 }
 
-// permissionsResponse is the JSON response for GET /auth/me/permissions.
-type permissionsResponse struct {
-	Subject     string            `json:"subject"`
+// scopedPermissions holds roles and permissions for a single scope.
+type scopedPermissions struct {
 	Roles       []string          `json:"roles"`
 	Permissions []permissionEntry `json:"permissions"`
+}
+
+// permissionsResponse is the JSON response for GET /auth/me/permissions.
+// Keys are omitted when the user has no assignments in that scope category.
+type permissionsResponse struct {
+	Subject  string                        `json:"subject"`
+	Platform *scopedPermissions            `json:"platform,omitempty"`
+	Tenants  map[string]*scopedPermissions `json:"tenants,omitempty"`
 }
 
 // checkResponse is the JSON response for GET /auth/me/check.
@@ -78,7 +85,29 @@ type checkResponse struct {
 	MatchedRoles []string `json:"matched_roles,omitempty"`
 }
 
-// handlePermissions returns the authenticated user's roles and effective permissions.
+var validScopeTypes = map[string]struct{}{
+	"platform": {},
+	"tenant":   {},
+}
+
+// parseScopeParams extracts and validates scope_type / scope_id query params.
+// Returns ("", "", nil) when no scope filter was requested.
+func parseScopeParams(r *http.Request) (scopeType, scopeID string, err error) {
+	scopeType = r.URL.Query().Get("scope_type")
+	if scopeType == "" {
+		return "", "", nil
+	}
+	if _, ok := validScopeTypes[scopeType]; !ok {
+		return "", "", fmt.Errorf("scope_type must be %q or %q", "platform", "tenant")
+	}
+	scopeID = r.URL.Query().Get("scope_id")
+	if scopeType == "tenant" && scopeID == "" {
+		return "", "", fmt.Errorf("scope_id is required when scope_type is %q", "tenant")
+	}
+	return scopeType, scopeID, nil
+}
+
+// handlePermissions returns the authenticated user's scoped roles and effective permissions.
 func (h *Handler) handlePermissions(w http.ResponseWriter, r *http.Request) {
 	subject := h.extractSubject(r)
 	if subject == "" {
@@ -91,22 +120,60 @@ func (h *Handler) handlePermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
-
-	// Get the subject's directly assigned roles.
-	rolesResp, err := h.authzClient.client.ListSubjectRoles(ctx, &pb.ListSubjectRolesRequest{
-		Subject: subject,
-	})
+	scopeType, scopeID, err := parseScopeParams(r)
 	if err != nil {
-		h.logger.Error("failed to list subject roles", "subject", subject, "error", err)
-		http.Error(w, "failed to fetch roles", http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Collect all effective roles (including inherited via parents).
+	ctx := r.Context()
+	resp := permissionsResponse{Subject: subject}
+
+	if scopeType != "" {
+		sp, err := h.resolveScope(ctx, subject, scopeType, scopeID)
+		if err != nil {
+			h.logger.Error("failed to resolve scope", "subject", subject, "scope_type", scopeType, "scope_id", scopeID, "error", err)
+			http.Error(w, "failed to fetch permissions", http.StatusBadGateway)
+			return
+		}
+		h.attachScope(&resp, scopeType, scopeID, sp)
+	} else {
+		scopesResp, err := h.authzClient.client.ListSubjectScopes(ctx, &pb.ListSubjectScopesRequest{
+			Subject: subject,
+		})
+		if err != nil {
+			h.logger.Error("failed to list subject scopes", "subject", subject, "error", err)
+			http.Error(w, "failed to fetch permissions", http.StatusBadGateway)
+			return
+		}
+		for _, sc := range scopesResp.Scopes {
+			sp, err := h.resolveScope(ctx, subject, sc.ScopeType, sc.ScopeId)
+			if err != nil {
+				h.logger.Warn("failed to resolve scope, skipping", "subject", subject, "scope_type", sc.ScopeType, "scope_id", sc.ScopeId, "error", err)
+				continue
+			}
+			h.attachScope(&resp, sc.ScopeType, sc.ScopeId, sp)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// resolveScope fetches roles and permissions for a single (scopeType, scopeID) pair.
+func (h *Handler) resolveScope(ctx context.Context, subject, scopeType, scopeID string) (*scopedPermissions, error) {
+	rolesResp, err := h.authzClient.client.ListSubjectRoles(ctx, &pb.ListSubjectRolesRequest{
+		Subject:   subject,
+		ScopeType: scopeType,
+		ScopeId:   scopeID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing roles: %w", err)
+	}
+
 	effectiveRoles := h.collectEffectiveRoles(ctx, rolesResp.Roles)
 
-	// Collect permissions from all effective roles.
 	var permissions []permissionEntry
 	seen := make(map[string]struct{})
 	for _, roleName := range effectiveRoles {
@@ -130,15 +197,23 @@ func (h *Handler) handlePermissions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := permissionsResponse{
-		Subject:     subject,
+	return &scopedPermissions{
 		Roles:       effectiveRoles,
 		Permissions: permissions,
-	}
+	}, nil
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "private, max-age=60")
-	_ = json.NewEncoder(w).Encode(resp)
+// attachScope places resolved permissions into the correct response field.
+func (h *Handler) attachScope(resp *permissionsResponse, scopeType, scopeID string, sp *scopedPermissions) {
+	switch scopeType {
+	case "platform":
+		resp.Platform = sp
+	case "tenant":
+		if resp.Tenants == nil {
+			resp.Tenants = make(map[string]*scopedPermissions)
+		}
+		resp.Tenants[scopeID] = sp
+	}
 }
 
 // handleCheck performs a single access check for the authenticated user.
@@ -154,17 +229,26 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resource := r.URL.Query().Get("resource")
-	action := r.URL.Query().Get("action")
+	q := r.URL.Query()
+	resource := q.Get("resource")
+	action := q.Get("action")
 	if resource == "" || action == "" {
 		http.Error(w, "resource and action query parameters are required", http.StatusBadRequest)
 		return
 	}
 
+	scopeType, scopeID, err := parseScopeParams(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	resp, err := h.authzClient.client.CheckAccess(r.Context(), &pb.CheckAccessRequest{
-		Subject:  subject,
-		Resource: resource,
-		Action:   action,
+		Subject:   subject,
+		Resource:  resource,
+		Action:    action,
+		ScopeType: scopeType,
+		ScopeId:   scopeID,
 	})
 	if err != nil {
 		h.logger.Error("failed to check access", "subject", subject, "resource", resource, "action", action, "error", err)

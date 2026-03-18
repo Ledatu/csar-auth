@@ -16,6 +16,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 
+	"github.com/ledatu/csar-core/audit"
 	"github.com/ledatu/csar-core/configload"
 	"github.com/ledatu/csar-core/configsource"
 	"github.com/ledatu/csar-core/gatewayctx"
@@ -161,9 +162,20 @@ func run(
 		logger.Info("authz client connected", "endpoint", cfg.Authz.Endpoint)
 	}
 
+	// --- Audit store ---
+	var auditStore audit.Store
+	if pgStore, ok := st.(*postgres.Store); ok {
+		pgAudit := audit.NewPostgresStore(pgStore.Pool(), logger.With("component", "audit"))
+		if err := pgAudit.Migrate(ctx); err != nil {
+			return fmt.Errorf("running audit migrations: %w", err)
+		}
+		auditStore = pgAudit
+		logger.Info("audit store initialized (shared postgres pool)")
+	}
+
 	// --- Routes ---
 	mux := http.NewServeMux()
-	h := handler.New(st, sessionMgr, oauthMgr, stsHandler, authzClient, logger, cfg)
+	h := handler.New(st, sessionMgr, oauthMgr, stsHandler, authzClient, auditStore, logger, cfg)
 	h.RegisterRoutes(mux)
 
 	// Health and readiness endpoints.
@@ -199,7 +211,7 @@ func run(
 		}
 
 		watchLogger := logger.With("component", "config_watcher")
-		applyFn := func(_ context.Context, data []byte) (bool, error) {
+		applyFn := func(applyCtx context.Context, data []byte) (bool, error) {
 			newCfg, err := config.LoadFromBytes(data)
 			if err != nil {
 				return false, err
@@ -210,7 +222,8 @@ func run(
 			}
 
 			if stsHandler != nil {
-				if err := stsHandler.Reload(newCfg.STS, newCfg.JWT); err != nil {
+				stsHandler.SetAssertionMaxAge(newCfg.STS.AssertionMaxAge.Std())
+				if err := stsHandler.Reload(applyCtx); err != nil {
 					return false, fmt.Errorf("reloading STS accounts: %w", err)
 				}
 			}
@@ -219,7 +232,6 @@ func run(
 
 			watchLogger.Info("config reloaded",
 				"providers", len(newCfg.OAuth.Providers),
-				"sts_accounts", len(newCfg.STS.ServiceAccounts),
 			)
 			return true, nil
 		}
@@ -300,11 +312,20 @@ func initSTS(
 		logger.Info("STS replay protection: postgres")
 	}
 
-	stsHandler, err := sts.New(cfg.STS, cfg.JWT, sessionMgr, replayStore, logger)
+	stsHandler, err := sts.New(
+		ctx,
+		st,
+		cfg.STS.AssertionMaxAge.Std(),
+		cfg.JWT.TTL.Std(),
+		cfg.JWT.Issuer,
+		sessionMgr,
+		replayStore,
+		logger,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("initializing STS: %w", err)
 	}
-	logger.Info("STS enabled", "service_accounts", len(cfg.STS.ServiceAccounts))
+	logger.Info("STS enabled")
 	return stsHandler, nil
 }
 

@@ -3,6 +3,7 @@ package mock
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -14,16 +15,18 @@ import (
 
 // Store is a thread-safe in-memory implementation of store.Store.
 type Store struct {
-	mu       sync.Mutex
-	users    map[uuid.UUID]*store.User
-	accounts map[string]*store.OAuthAccount // key: provider|provider_user_id
+	mu              sync.Mutex
+	users           map[uuid.UUID]*store.User
+	accounts        map[string]*store.OAuthAccount  // key: provider|provider_user_id
+	serviceAccounts map[string]*store.ServiceAccount // key: name
 }
 
 // New returns a new mock Store.
 func New() *Store {
 	return &Store{
-		users:    make(map[uuid.UUID]*store.User),
-		accounts: make(map[string]*store.OAuthAccount),
+		users:           make(map[uuid.UUID]*store.User),
+		accounts:        make(map[string]*store.OAuthAccount),
+		serviceAccounts: make(map[string]*store.ServiceAccount),
 	}
 }
 
@@ -260,6 +263,70 @@ func (s *Store) CountOAuthAccounts(_ context.Context, userID uuid.UUID) (int, er
 		}
 	}
 	return n, nil
+}
+
+func (s *Store) ListActiveServiceAccounts(_ context.Context) ([]store.ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []store.ServiceAccount
+	for _, sa := range s.serviceAccounts {
+		if sa.Status == "active" {
+			out = append(out, *sa)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) GetServiceAccount(_ context.Context, name string) (*store.ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sa, ok := s.serviceAccounts[name]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *sa
+	return &cp, nil
+}
+
+func (s *Store) CreateServiceAccount(_ context.Context, sa *store.ServiceAccount) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.serviceAccounts[sa.Name]; ok {
+		return fmt.Errorf("service account %q already exists", sa.Name)
+	}
+	if sa.Status == "" {
+		sa.Status = "active"
+	}
+	sa.CreatedAt = time.Now()
+	cp := *sa
+	s.serviceAccounts[sa.Name] = &cp
+	return nil
+}
+
+func (s *Store) UpdateServiceAccountKey(_ context.Context, name, newPEM string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sa, ok := s.serviceAccounts[name]
+	if !ok || sa.Status != "active" {
+		return store.ErrNotFound
+	}
+	sa.PublicKeyPEM = newPEM
+	now := time.Now()
+	sa.RotatedAt = &now
+	return nil
+}
+
+func (s *Store) RevokeServiceAccount(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sa, ok := s.serviceAccounts[name]
+	if !ok || sa.Status != "active" {
+		return store.ErrNotFound
+	}
+	sa.Status = "revoked"
+	now := time.Now()
+	sa.RevokedAt = &now
+	return nil
 }
 
 func (s *Store) Migrate(_ context.Context) error { return nil }

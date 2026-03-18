@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ledatu/csar-core/audit"
 	"github.com/ledatu/csar-core/httpx"
 
 	"github.com/ledatu/csar-authn/internal/config"
@@ -27,19 +28,21 @@ type Handler struct {
 	oauthMgr    *oauth.Manager
 	stsHandler  *sts.Handler  // nil when STS is not configured
 	authzClient *AuthzClient  // nil when authz is not configured
+	auditStore  audit.Store   // nil when audit is not configured
 	logger      *slog.Logger
 	cfg         atomic.Pointer[config.Config]
 }
 
 // New creates a Handler with all dependencies.
-// stsHandler and authzClient may be nil when their features are not enabled.
-func New(st store.Store, sessionMgr *session.Manager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, logger *slog.Logger, cfg *config.Config) *Handler {
+// stsHandler, authzClient, and auditStore may be nil when their features are not enabled.
+func New(st store.Store, sessionMgr *session.Manager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, auditStore audit.Store, logger *slog.Logger, cfg *config.Config) *Handler {
 	h := &Handler{
 		store:       st,
 		sessionMgr:  sessionMgr,
 		oauthMgr:    oauthMgr,
 		stsHandler:  stsHandler,
 		authzClient: authzClient,
+		auditStore:  auditStore,
 		logger:      logger,
 	}
 	h.cfg.Store(cfg)
@@ -96,6 +99,13 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	if h.authzClient != nil {
 		mux.HandleFunc("GET /auth/me/permissions", h.handlePermissions)
 		mux.HandleFunc("GET /auth/me/check", h.handleCheck)
+
+		// Service account admin endpoints.
+		mux.HandleFunc("GET /admin/service-accounts", h.handleListServiceAccounts)
+		mux.HandleFunc("POST /admin/service-accounts", h.handleCreateServiceAccount)
+		mux.HandleFunc("GET /admin/service-accounts/{name}", h.handleGetServiceAccount)
+		mux.HandleFunc("DELETE /admin/service-accounts/{name}", h.handleRevokeServiceAccount)
+		mux.HandleFunc("POST /admin/service-accounts/{name}/rotate", h.handleRotateServiceAccount)
 	}
 }
 

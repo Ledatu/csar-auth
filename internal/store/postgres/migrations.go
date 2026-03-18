@@ -76,6 +76,23 @@ CREATE UNIQUE INDEX idx_users_email_lower ON users (lower(email)) WHERE email IS
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users (phone) WHERE phone IS NOT NULL AND phone != '';
 `,
 	},
+	{
+		Name: "006_service_accounts",
+		Up: `
+CREATE TABLE IF NOT EXISTS service_accounts (
+    name                TEXT PRIMARY KEY,
+    public_key_pem      TEXT NOT NULL,
+    allowed_audiences   TEXT[] NOT NULL DEFAULT '{}',
+    allow_all_audiences BOOLEAN NOT NULL DEFAULT false,
+    token_ttl           INTERVAL NOT NULL DEFAULT '1 hour',
+    status              TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'revoked')),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    rotated_at          TIMESTAMPTZ,
+    revoked_at          TIMESTAMPTZ
+);
+`,
+	},
 }
 
 // runMigrations applies pending schema migrations using the shared runner.

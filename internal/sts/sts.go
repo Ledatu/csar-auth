@@ -4,6 +4,7 @@
 package sts
 
 import (
+	"context"
 	"crypto"
 	"crypto/x509"
 	"encoding/base64"
@@ -12,13 +13,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-authn/internal/session"
+	"github.com/ledatu/csar-authn/internal/store"
 	"github.com/ledatu/csar-core/jwtx"
 )
 
@@ -33,6 +33,11 @@ type serviceAccount struct {
 	TokenTTL          time.Duration   // 0 means use default
 }
 
+// ServiceAccountLister loads active service accounts from the database.
+type ServiceAccountLister interface {
+	ListActiveServiceAccounts(ctx context.Context) ([]store.ServiceAccount, error)
+}
+
 // Handler handles STS token exchange requests (POST /sts/token).
 // Fields guarded by mu (accounts, assertionMaxAge) may be swapped at
 // runtime via Reload without restarting the service.
@@ -41,6 +46,7 @@ type Handler struct {
 	accounts        map[string]*serviceAccount // keyed by SA name
 	assertionMaxAge time.Duration
 
+	saLister    ServiceAccountLister
 	sessionMgr  *session.Manager
 	replayStore ReplayStore
 	defaultTTL  time.Duration // from jwt.ttl
@@ -48,11 +54,10 @@ type Handler struct {
 	logger      *slog.Logger
 }
 
-// New creates an STS handler, loading all service account public keys.
+// New creates an STS handler, loading service accounts from the database.
 // If replayStore is nil, a local in-memory replay store is used as fallback.
-// Returns an error if any key fails to load (fail-fast).
-func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.Manager, replayStore ReplayStore, logger *slog.Logger) (*Handler, error) {
-	accounts, err := buildAccounts(stsCfg, logger)
+func New(ctx context.Context, saLister ServiceAccountLister, assertionMaxAge, defaultTTL time.Duration, issuer string, sessionMgr *session.Manager, replayStore ReplayStore, logger *slog.Logger) (*Handler, error) {
+	accounts, err := buildAccounts(ctx, saLister, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -64,62 +69,72 @@ func New(stsCfg config.STSConfig, jwtCfg config.JWTConfig, sessionMgr *session.M
 
 	return &Handler{
 		accounts:        accounts,
+		assertionMaxAge: assertionMaxAge,
+		saLister:        saLister,
 		sessionMgr:      sessionMgr,
 		replayStore:     replayStore,
-		assertionMaxAge: stsCfg.AssertionMaxAge.Std(),
-		defaultTTL:      jwtCfg.TTL.Std(),
-		issuer:          jwtCfg.Issuer,
+		defaultTTL:      defaultTTL,
+		issuer:          issuer,
 		logger:          logger,
 	}, nil
 }
 
-// Reload atomically replaces service accounts and timing config.
-// The replay store, session manager, and signing keys are preserved.
+// Reload atomically replaces service accounts from the database.
 // On error the previous accounts remain active.
-func (h *Handler) Reload(stsCfg config.STSConfig, jwtCfg config.JWTConfig) error {
-	accounts, err := buildAccounts(stsCfg, h.logger)
+func (h *Handler) Reload(ctx context.Context) error {
+	accounts, err := buildAccounts(ctx, h.saLister, h.logger)
 	if err != nil {
 		return err
 	}
 
 	h.mu.Lock()
 	h.accounts = accounts
-	h.assertionMaxAge = stsCfg.AssertionMaxAge.Std()
 	h.mu.Unlock()
 	return nil
 }
 
-// buildAccounts loads all service account public keys from config.
-func buildAccounts(stsCfg config.STSConfig, logger *slog.Logger) (map[string]*serviceAccount, error) {
-	accounts := make(map[string]*serviceAccount, len(stsCfg.ServiceAccounts))
+// SetAssertionMaxAge updates the assertion max age (e.g. after config reload).
+func (h *Handler) SetAssertionMaxAge(d time.Duration) {
+	h.mu.Lock()
+	h.assertionMaxAge = d
+	h.mu.Unlock()
+}
 
-	for name, saCfg := range stsCfg.ServiceAccounts {
-		pubKey, err := loadPublicKey(saCfg)
+// buildAccounts loads all active service accounts from the database.
+func buildAccounts(ctx context.Context, lister ServiceAccountLister, logger *slog.Logger) (map[string]*serviceAccount, error) {
+	records, err := lister.ListActiveServiceAccounts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing service accounts: %w", err)
+	}
+
+	accounts := make(map[string]*serviceAccount, len(records))
+	for _, rec := range records {
+		pubKey, err := parsePublicKeyPEM([]byte(rec.PublicKeyPEM))
 		if err != nil {
-			return nil, fmt.Errorf("loading public key for SA %q: %w", name, err)
+			return nil, fmt.Errorf("loading public key for SA %q: %w", rec.Name, err)
 		}
 
 		alg, err := jwtx.DetectAlgorithm(pubKey)
 		if err != nil {
-			return nil, fmt.Errorf("SA %q: %w", name, err)
+			return nil, fmt.Errorf("SA %q: %w", rec.Name, err)
 		}
 
-		audSet := make(map[string]bool, len(saCfg.AllowedAudiences))
-		for _, a := range saCfg.AllowedAudiences {
+		audSet := make(map[string]bool, len(rec.AllowedAudiences))
+		for _, a := range rec.AllowedAudiences {
 			audSet[a] = true
 		}
 
-		accounts[name] = &serviceAccount{
+		accounts[rec.Name] = &serviceAccount{
 			PublicKey:         pubKey,
 			Algorithm:         alg,
 			AllowedAudiences:  audSet,
-			AllowAllAudiences: saCfg.AllowAllAudiences,
-			TokenTTL:          saCfg.TokenTTL.Std(),
+			AllowAllAudiences: rec.AllowAllAudiences,
+			TokenTTL:          rec.TokenTTL,
 		}
 		logger.Info("loaded STS service account",
-			"name", name,
+			"name", rec.Name,
 			"algorithm", alg,
-			"audiences", saCfg.AllowedAudiences,
+			"audiences", rec.AllowedAudiences,
 		)
 	}
 
@@ -275,25 +290,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Public key loading
 // ---------------------------------------------------------------------------
 
-// loadPublicKey reads a PEM-encoded PKIX public key from file or inline config.
-func loadPublicKey(saCfg config.ServiceAccountConfig) (crypto.PublicKey, error) {
-	var pemData []byte
-
-	if saCfg.PublicKeyFile != "" {
-		data, err := os.ReadFile(saCfg.PublicKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading file %s: %w", saCfg.PublicKeyFile, err)
-		}
-		pemData = data
-	} else {
-		pemData = []byte(saCfg.PublicKey)
-	}
-
+// parsePublicKeyPEM decodes a PEM-encoded PKIX public key.
+func parsePublicKeyPEM(pemData []byte) (crypto.PublicKey, error) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block found")
 	}
-
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parsing public key: %w", err)

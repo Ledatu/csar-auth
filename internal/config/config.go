@@ -15,18 +15,17 @@ import (
 
 // Re-export all types as aliases so callers keep using config.XYZ.
 type (
-	Config               = authnconfig.Config
-	AuthzConfig          = authnconfig.AuthzConfig
-	AuthzTLSConfig       = authnconfig.AuthzTLSConfig
-	STSConfig            = authnconfig.STSConfig
-	ServiceAccountConfig = authnconfig.ServiceAccountConfig
-	DatabaseConfig       = authnconfig.DatabaseConfig
-	JWTConfig            = authnconfig.JWTConfig
-	OAuthConfig          = authnconfig.OAuthConfig
-	ProviderConfig       = authnconfig.ProviderConfig
-	CookieConfig         = authnconfig.CookieConfig
-	RedisConfig          = authnconfig.RedisConfig
-	Duration             = authnconfig.Duration
+	Config         = authnconfig.Config
+	AuthzConfig    = authnconfig.AuthzConfig
+	AuthzTLSConfig = authnconfig.AuthzTLSConfig
+	STSConfig      = authnconfig.STSConfig
+	DatabaseConfig = authnconfig.DatabaseConfig
+	JWTConfig      = authnconfig.JWTConfig
+	OAuthConfig    = authnconfig.OAuthConfig
+	ProviderConfig = authnconfig.ProviderConfig
+	CookieConfig   = authnconfig.CookieConfig
+	RedisConfig    = authnconfig.RedisConfig
+	Duration       = authnconfig.Duration
 )
 
 // NewDuration re-exports authnconfig.NewDuration.

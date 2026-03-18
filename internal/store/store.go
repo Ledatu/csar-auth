@@ -55,6 +55,19 @@ type OAuthAccount struct {
 	UpdatedAt      time.Time
 }
 
+// ServiceAccount represents an STS service account stored in the database.
+type ServiceAccount struct {
+	Name              string
+	PublicKeyPEM      string
+	AllowedAudiences  []string
+	AllowAllAudiences bool
+	TokenTTL          time.Duration
+	Status            string // "active" or "revoked"
+	CreatedAt         time.Time
+	RotatedAt         *time.Time
+	RevokedAt         *time.Time
+}
+
 // Store defines the persistence contract for csar-authn.
 // Implementations must be safe for concurrent use.
 type Store interface {
@@ -107,6 +120,24 @@ type Store interface {
 
 	// CountOAuthAccounts returns the number of linked OAuth accounts for a user.
 	CountOAuthAccounts(ctx context.Context, userID uuid.UUID) (int, error)
+
+	// ListActiveServiceAccounts returns all service accounts with status "active".
+	ListActiveServiceAccounts(ctx context.Context) ([]ServiceAccount, error)
+
+	// GetServiceAccount returns a service account by name (any status).
+	// Returns ErrNotFound if the service account does not exist.
+	GetServiceAccount(ctx context.Context, name string) (*ServiceAccount, error)
+
+	// CreateServiceAccount inserts a new service account.
+	CreateServiceAccount(ctx context.Context, sa *ServiceAccount) error
+
+	// UpdateServiceAccountKey rotates the public key for an active service account.
+	// Returns ErrNotFound if the service account does not exist or is not active.
+	UpdateServiceAccountKey(ctx context.Context, name, newPEM string) error
+
+	// RevokeServiceAccount soft-deletes a service account by setting status to "revoked".
+	// Returns ErrNotFound if the service account does not exist.
+	RevokeServiceAccount(ctx context.Context, name string) error
 
 	// Migrate runs schema migrations (idempotent).
 	Migrate(ctx context.Context) error
