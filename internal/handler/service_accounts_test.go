@@ -50,7 +50,7 @@ func (m *mockAuditStore) Record(_ context.Context, event *audit.Event) error {
 	return nil
 }
 
-func (m *mockAuditStore) List(_ context.Context, _ audit.ListFilter) (*audit.ListResult, error) {
+func (m *mockAuditStore) List(_ context.Context, _ *audit.ListFilter) (*audit.ListResult, error) {
 	return &audit.ListResult{}, nil
 }
 

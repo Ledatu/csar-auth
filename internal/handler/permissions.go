@@ -242,6 +242,9 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if scopeType == "" {
+		scopeType = "platform"
+	}
 
 	resp, err := h.authzClient.client.CheckAccess(r.Context(), &pb.CheckAccessRequest{
 		Subject:   subject,

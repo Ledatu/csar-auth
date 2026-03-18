@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-core/jwtx"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // Claims represents the JWT payload issued by csar-authn.
@@ -37,12 +37,12 @@ func NewManager(keys *KeyPair, cfg config.JWTConfig) *Manager {
 func (m *Manager) IssueToken(userID, email, displayName string) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"sub":          userID,
-		"iss":          m.cfg.Issuer,
-		"aud":          m.cfg.Audience,
-		"iat":          jwt.NewNumericDate(now),
-		"nbf":          jwt.NewNumericDate(now),
-		"exp":          jwt.NewNumericDate(now.Add(m.cfg.TTL.Std())),
+		"sub": userID,
+		"iss": m.cfg.Issuer,
+		"aud": m.cfg.Audience,
+		"iat": jwt.NewNumericDate(now),
+		"nbf": jwt.NewNumericDate(now),
+		"exp": jwt.NewNumericDate(now.Add(m.cfg.TTL.Std())),
 	}
 	if email != "" {
 		claims["email"] = email

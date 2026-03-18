@@ -24,8 +24,8 @@ type FindOrCreateResult int
 
 const (
 	ResultExistingLogin    FindOrCreateResult = iota // Existing oauth link, user logged in
-	ResultLinkedToExisting                            // Auto-linked to existing user via verified email
-	ResultCreatedNewUser                              // Brand new user + oauth link created
+	ResultLinkedToExisting                           // Auto-linked to existing user via verified email
+	ResultCreatedNewUser                             // Brand new user + oauth link created
 )
 
 // User represents an authenticated user with a stable internal UUID.

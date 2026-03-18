@@ -50,13 +50,15 @@ func (h *Handler) recordAudit(r *http.Request, actor, action, targetType, target
 	}
 }
 
-func (h *Handler) reloadSTS(r *http.Request) {
+func (h *Handler) reloadSTS(r *http.Request) error {
 	if h.stsHandler == nil {
-		return
+		return nil
 	}
 	if err := h.stsHandler.Reload(r.Context()); err != nil {
 		h.logger.Error("failed to reload STS after SA mutation", "error", err)
+		return err
 	}
+	return nil
 }
 
 // --- Response types ---
@@ -191,13 +193,16 @@ func (h *Handler) handleCreateServiceAccount(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.reloadSTS(r)
+	if err := h.reloadSTS(r); err != nil {
+		apierror.New("reload_failed", http.StatusInternalServerError, "service account persisted but live reload failed").Write(w)
+		return
+	}
 
 	afterJSON, _ := json.Marshal(map[string]any{
-		"name":               sa.Name,
-		"allowed_audiences":  sa.AllowedAudiences,
+		"name":                sa.Name,
+		"allowed_audiences":   sa.AllowedAudiences,
 		"allow_all_audiences": sa.AllowAllAudiences,
-		"token_ttl":          sa.TokenTTL.String(),
+		"token_ttl":           sa.TokenTTL.String(),
 	})
 	h.recordAudit(r, subject, "service_account.create", "service_account", sa.Name, afterJSON)
 
@@ -273,7 +278,10 @@ func (h *Handler) handleRevokeServiceAccount(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.reloadSTS(r)
+	if err := h.reloadSTS(r); err != nil {
+		apierror.New("reload_failed", http.StatusInternalServerError, "service account persisted but live reload failed").Write(w)
+		return
+	}
 
 	h.recordAudit(r, subject, "service_account.revoke", "service_account", name, nil)
 
@@ -323,7 +331,10 @@ func (h *Handler) handleRotateServiceAccount(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.reloadSTS(r)
+	if err := h.reloadSTS(r); err != nil {
+		apierror.New("reload_failed", http.StatusInternalServerError, "service account persisted but live reload failed").Write(w)
+		return
+	}
 
 	h.recordAudit(r, subject, "service_account.rotate", "service_account", name, nil)
 

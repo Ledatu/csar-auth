@@ -74,6 +74,7 @@ func setupLifecycleEnv(t *testing.T) (*Handler, *mock.Store, ed25519.PrivateKey)
 	ctx := context.Background()
 	h, err := New(
 		ctx, st,
+		nil,
 		5*time.Minute,
 		time.Hour,
 		testIssuer,

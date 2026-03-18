@@ -391,8 +391,8 @@ func TestCheck_WithoutScope(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	if capturedReq.ScopeType != "" {
-		t.Errorf("scope_type should be empty, got %q", capturedReq.ScopeType)
+	if capturedReq.ScopeType != "platform" {
+		t.Errorf("scope_type = %q, want %q (unscoped check defaults to platform)", capturedReq.ScopeType, "platform")
 	}
 	if capturedReq.ScopeId != "" {
 		t.Errorf("scope_id should be empty, got %q", capturedReq.ScopeId)

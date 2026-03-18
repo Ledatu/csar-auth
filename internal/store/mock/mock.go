@@ -17,7 +17,7 @@ import (
 type Store struct {
 	mu              sync.Mutex
 	users           map[uuid.UUID]*store.User
-	accounts        map[string]*store.OAuthAccount  // key: provider|provider_user_id
+	accounts        map[string]*store.OAuthAccount   // key: provider|provider_user_id
 	serviceAccounts map[string]*store.ServiceAccount // key: name
 }
 

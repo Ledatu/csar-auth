@@ -312,9 +312,21 @@ func initSTS(
 		logger.Info("STS replay protection: postgres")
 	}
 
+	var bootstrap []sts.BootstrapAccount
+	for _, ba := range cfg.STS.Accounts {
+		bootstrap = append(bootstrap, sts.BootstrapAccount{
+			Name:              ba.Name,
+			PublicKeyPEM:      ba.PublicKeyPEM,
+			AllowedAudiences:  ba.AllowedAudiences,
+			AllowAllAudiences: ba.AllowAllAudiences,
+			TokenTTL:          ba.TokenTTL.Std(),
+		})
+	}
+
 	stsHandler, err := sts.New(
 		ctx,
 		st,
+		bootstrap,
 		cfg.STS.AssertionMaxAge.Std(),
 		cfg.JWT.TTL.Std(),
 		cfg.JWT.Issuer,
@@ -328,4 +340,3 @@ func initSTS(
 	logger.Info("STS enabled")
 	return stsHandler, nil
 }
-

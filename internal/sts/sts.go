@@ -38,6 +38,16 @@ type ServiceAccountLister interface {
 	ListActiveServiceAccounts(ctx context.Context) ([]store.ServiceAccount, error)
 }
 
+// BootstrapAccount mirrors authnconfig.BootstrapAccount without importing
+// the config package directly so that sts stays config-schema-agnostic.
+type BootstrapAccount struct {
+	Name              string
+	PublicKeyPEM      string
+	AllowedAudiences  []string
+	AllowAllAudiences bool
+	TokenTTL          time.Duration
+}
+
 // Handler handles STS token exchange requests (POST /sts/token).
 // Fields guarded by mu (accounts, assertionMaxAge) may be swapped at
 // runtime via Reload without restarting the service.
@@ -46,18 +56,20 @@ type Handler struct {
 	accounts        map[string]*serviceAccount // keyed by SA name
 	assertionMaxAge time.Duration
 
-	saLister    ServiceAccountLister
-	sessionMgr  *session.Manager
-	replayStore ReplayStore
-	defaultTTL  time.Duration // from jwt.ttl
-	issuer      string        // expected "aud" in incoming assertions
-	logger      *slog.Logger
+	saLister          ServiceAccountLister
+	bootstrapAccounts []BootstrapAccount
+	sessionMgr        *session.Manager
+	replayStore       ReplayStore
+	defaultTTL        time.Duration // from jwt.ttl
+	issuer            string        // expected "aud" in incoming assertions
+	logger            *slog.Logger
 }
 
-// New creates an STS handler, loading service accounts from the database.
+// New creates an STS handler, loading service accounts from the database
+// and merging in any bootstrap accounts from config (config wins by name).
 // If replayStore is nil, a local in-memory replay store is used as fallback.
-func New(ctx context.Context, saLister ServiceAccountLister, assertionMaxAge, defaultTTL time.Duration, issuer string, sessionMgr *session.Manager, replayStore ReplayStore, logger *slog.Logger) (*Handler, error) {
-	accounts, err := buildAccounts(ctx, saLister, logger)
+func New(ctx context.Context, saLister ServiceAccountLister, bootstrap []BootstrapAccount, assertionMaxAge, defaultTTL time.Duration, issuer string, sessionMgr *session.Manager, replayStore ReplayStore, logger *slog.Logger) (*Handler, error) {
+	accounts, err := buildAccounts(ctx, saLister, bootstrap, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -68,21 +80,23 @@ func New(ctx context.Context, saLister ServiceAccountLister, assertionMaxAge, de
 	}
 
 	return &Handler{
-		accounts:        accounts,
-		assertionMaxAge: assertionMaxAge,
-		saLister:        saLister,
-		sessionMgr:      sessionMgr,
-		replayStore:     replayStore,
-		defaultTTL:      defaultTTL,
-		issuer:          issuer,
-		logger:          logger,
+		accounts:          accounts,
+		assertionMaxAge:   assertionMaxAge,
+		saLister:          saLister,
+		bootstrapAccounts: bootstrap,
+		sessionMgr:        sessionMgr,
+		replayStore:       replayStore,
+		defaultTTL:        defaultTTL,
+		issuer:            issuer,
+		logger:            logger,
 	}, nil
 }
 
-// Reload atomically replaces service accounts from the database.
+// Reload atomically replaces service accounts from the database,
+// re-merging bootstrap accounts from config (config wins by name).
 // On error the previous accounts remain active.
 func (h *Handler) Reload(ctx context.Context) error {
-	accounts, err := buildAccounts(ctx, h.saLister, h.logger)
+	accounts, err := buildAccounts(ctx, h.saLister, h.bootstrapAccounts, h.logger)
 	if err != nil {
 		return err
 	}
@@ -100,14 +114,15 @@ func (h *Handler) SetAssertionMaxAge(d time.Duration) {
 	h.mu.Unlock()
 }
 
-// buildAccounts loads all active service accounts from the database.
-func buildAccounts(ctx context.Context, lister ServiceAccountLister, logger *slog.Logger) (map[string]*serviceAccount, error) {
+// buildAccounts loads active service accounts from the database, then
+// overlays bootstrap accounts from config. Config entries win by name.
+func buildAccounts(ctx context.Context, lister ServiceAccountLister, bootstrap []BootstrapAccount, logger *slog.Logger) (map[string]*serviceAccount, error) {
 	records, err := lister.ListActiveServiceAccounts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing service accounts: %w", err)
 	}
 
-	accounts := make(map[string]*serviceAccount, len(records))
+	accounts := make(map[string]*serviceAccount, len(records)+len(bootstrap))
 	for _, rec := range records {
 		pubKey, err := parsePublicKeyPEM([]byte(rec.PublicKeyPEM))
 		if err != nil {
@@ -133,8 +148,37 @@ func buildAccounts(ctx context.Context, lister ServiceAccountLister, logger *slo
 		}
 		logger.Info("loaded STS service account",
 			"name", rec.Name,
+			"source", "database",
 			"algorithm", alg,
 			"audiences", rec.AllowedAudiences,
+		)
+	}
+
+	for _, ba := range bootstrap {
+		pubKey, err := parsePublicKeyPEM([]byte(ba.PublicKeyPEM))
+		if err != nil {
+			return nil, fmt.Errorf("loading bootstrap SA %q public key: %w", ba.Name, err)
+		}
+		alg, err := jwtx.DetectAlgorithm(pubKey)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap SA %q: %w", ba.Name, err)
+		}
+		audSet := make(map[string]bool, len(ba.AllowedAudiences))
+		for _, a := range ba.AllowedAudiences {
+			audSet[a] = true
+		}
+		accounts[ba.Name] = &serviceAccount{
+			PublicKey:         pubKey,
+			Algorithm:         alg,
+			AllowedAudiences:  audSet,
+			AllowAllAudiences: ba.AllowAllAudiences,
+			TokenTTL:          ba.TokenTTL,
+		}
+		logger.Info("loaded STS service account",
+			"name", ba.Name,
+			"source", "config",
+			"algorithm", alg,
+			"audiences", ba.AllowedAudiences,
 		)
 	}
 

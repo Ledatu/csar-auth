@@ -26,9 +26,9 @@ type Handler struct {
 	store       store.Store
 	sessionMgr  *session.Manager
 	oauthMgr    *oauth.Manager
-	stsHandler  *sts.Handler  // nil when STS is not configured
-	authzClient *AuthzClient  // nil when authz is not configured
-	auditStore  audit.Store   // nil when audit is not configured
+	stsHandler  *sts.Handler // nil when STS is not configured
+	authzClient *AuthzClient // nil when authz is not configured
+	auditStore  audit.Store  // nil when audit is not configured
 	logger      *slog.Logger
 	cfg         atomic.Pointer[config.Config]
 }
@@ -242,4 +242,3 @@ func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("provider unlinked", "user_id", userID, "provider", provider)
 	w.WriteHeader(http.StatusNoContent)
 }
-
