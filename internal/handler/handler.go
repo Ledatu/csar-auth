@@ -96,7 +96,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /auth/providers/{provider}", h.handleUnlinkProvider)
 
 	// Account merge: initiate merge OAuth flow and execute merge.
-	mux.HandleFunc("GET /auth/merge/{provider}", h.handleMergeInitiate)
+	// Initiate lives under /auth/merge/start/{provider} to avoid conflict
+	// with the wildcard in GET /auth/{provider}/callback.
+	mux.HandleFunc("GET /auth/merge/start/{provider}", h.handleMergeInitiate)
 	mux.HandleFunc("POST /auth/merge", h.handleMerge)
 
 	// STS token exchange: POST /sts/token (optional).
