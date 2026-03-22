@@ -47,19 +47,25 @@ func (h *Handler) resolveAuth(r *http.Request) (*store.Session, *store.User, boo
 		}
 	}
 
-	cookie, err := r.Cookie(cfg.Cookie.Name)
-	if err != nil {
-		return nil, nil, false
+	// Try all cookies with the configured name. During migration from JWT
+	// cookies to opaque session IDs, the browser may send both (different
+	// Domain attributes make them distinct cookies with the same name).
+	// r.Cookie() only returns the first match, so we iterate manually.
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != cfg.Cookie.Name {
+			continue
+		}
+		sess, err := h.sessMgr.Validate(r.Context(), cookie.Value)
+		if err != nil {
+			continue
+		}
+		user, err := h.store.GetUserByID(r.Context(), sess.UserID)
+		if err != nil {
+			continue
+		}
+		return sess, user, true
 	}
-	sess, err := h.sessMgr.Validate(r.Context(), cookie.Value)
-	if err != nil {
-		return nil, nil, false
-	}
-	user, err := h.store.GetUserByID(r.Context(), sess.UserID)
-	if err != nil {
-		return nil, nil, false
-	}
-	return sess, user, true
+	return nil, nil, false
 }
 
 // authenticateRequest validates the caller via Bearer JWT or session cookie.
