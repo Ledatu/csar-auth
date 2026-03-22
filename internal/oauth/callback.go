@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -92,6 +94,19 @@ func CallbackHandler(
 		}
 
 		phone := extractPhone(gothUser.RawData)
+
+		if gothUser.Provider == "telegram" {
+			if botID := extractTelegramBotID(gothUser.RawData); botID != "" && botID != gothUser.UserID {
+				migrated, err := st.MigrateTelegramID(r.Context(), botID, gothUser.UserID)
+				if err != nil {
+					logger.Warn("telegram ID migration failed",
+						"bot_id", botID, "oidc_sub", gothUser.UserID, "error", err)
+				} else if migrated {
+					logger.Info("migrated telegram provider_user_id",
+						"bot_id", botID, "oidc_sub", gothUser.UserID)
+				}
+			}
+		}
 
 		if intent == "link" {
 			handleLinkCallback(w, r, st, sessMgr, oauthMgr, cookieName, acct, phone, provider, logger)
@@ -392,5 +407,22 @@ func extractPhone(raw map[string]interface{}) string {
 		}
 	}
 
+	return ""
+}
+
+// extractTelegramBotID extracts the numeric Telegram Bot API user ID from the
+// OIDC id_token claims. Telegram's id_token includes both "sub" (OIDC subject)
+// and "id" (Bot API user ID); we use the latter to match legacy records.
+func extractTelegramBotID(raw map[string]interface{}) string {
+	v, ok := raw["id"]
+	if !ok {
+		return ""
+	}
+	switch id := v.(type) {
+	case float64:
+		return strconv.FormatInt(int64(id), 10)
+	case json.Number:
+		return id.String()
+	}
 	return ""
 }

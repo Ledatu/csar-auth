@@ -211,6 +211,12 @@ type Store interface {
 	// GetPendingAuthzMerges returns consumed merge records where authz has not yet completed.
 	GetPendingAuthzMerges(ctx context.Context) ([]MergeRecord, error)
 
+	// MigrateTelegramID atomically updates a Telegram oauth_account's
+	// provider_user_id from a Bot API ID to an OIDC sub.
+	// Returns true if a row was updated, false if the old ID was not found
+	// or the new ID already exists.
+	MigrateTelegramID(ctx context.Context, botAPIID, oidcSub string) (bool, error)
+
 	// Migrate runs schema migrations (idempotent).
 	Migrate(ctx context.Context) error
 

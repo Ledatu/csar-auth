@@ -218,3 +218,144 @@ func TestLinkOAuthAccount(t *testing.T) {
 		t.Fatalf("expected ErrProviderAlreadyLinked, got %v", err)
 	}
 }
+
+func TestMigrateTelegramID_Success(t *testing.T) {
+	s := mock.New()
+	user := &store.User{ID: uuid.New(), Phone: "+1111111111"}
+	s.SeedUser(user)
+
+	acct := &store.OAuthAccount{
+		Provider:       "telegram",
+		ProviderUserID: "123456",
+		UserID:         user.ID,
+	}
+	if err := s.CreateOAuthAccount(context.Background(), acct); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated {
+		t.Fatal("expected migration to succeed")
+	}
+
+	// Old key should be gone.
+	_, err = s.GetOAuthAccount(context.Background(), "telegram", "123456")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected old key to be gone, got %v", err)
+	}
+
+	// New key should exist and point to the same user.
+	got, err := s.GetOAuthAccount(context.Background(), "telegram", "99999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UserID != user.ID {
+		t.Fatalf("expected user_id %s, got %s", user.ID, got.UserID)
+	}
+}
+
+func TestMigrateTelegramID_CleanupSameUser(t *testing.T) {
+	s := mock.New()
+	user := &store.User{ID: uuid.New(), Phone: "+2222222222"}
+	s.SeedUser(user)
+
+	// Both bot API and OIDC entries exist for the SAME user.
+	oldAcct := &store.OAuthAccount{
+		Provider:       "telegram",
+		ProviderUserID: "123456",
+		UserID:         user.ID,
+	}
+	if err := s.CreateOAuthAccount(context.Background(), oldAcct); err != nil {
+		t.Fatal(err)
+	}
+	newAcct := &store.OAuthAccount{
+		Provider:       "telegram",
+		ProviderUserID: "99999999999999",
+		UserID:         user.ID,
+	}
+	if err := s.CreateOAuthAccount(context.Background(), newAcct); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated {
+		t.Fatal("expected stale bot API entry to be cleaned up")
+	}
+
+	// Old key should be gone.
+	_, err = s.GetOAuthAccount(context.Background(), "telegram", "123456")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected old key to be deleted, got %v", err)
+	}
+
+	// OIDC key should still exist.
+	got, err := s.GetOAuthAccount(context.Background(), "telegram", "99999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UserID != user.ID {
+		t.Fatalf("expected user_id %s, got %s", user.ID, got.UserID)
+	}
+}
+
+func TestMigrateTelegramID_DifferentUsers(t *testing.T) {
+	s := mock.New()
+	user1 := &store.User{ID: uuid.New(), Phone: "+2222222222"}
+	user2 := &store.User{ID: uuid.New(), Phone: "+3333333333"}
+	s.SeedUser(user1)
+	s.SeedUser(user2)
+
+	// Bot API entry belongs to user2, OIDC sub belongs to user1.
+	oldAcct := &store.OAuthAccount{
+		Provider:       "telegram",
+		ProviderUserID: "123456",
+		UserID:         user2.ID,
+	}
+	if err := s.CreateOAuthAccount(context.Background(), oldAcct); err != nil {
+		t.Fatal(err)
+	}
+	newAcct := &store.OAuthAccount{
+		Provider:       "telegram",
+		ProviderUserID: "99999999999999",
+		UserID:         user1.ID,
+	}
+	if err := s.CreateOAuthAccount(context.Background(), newAcct); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated {
+		t.Fatal("expected no change when entries belong to different users")
+	}
+
+	// Both entries should still exist.
+	_, err = s.GetOAuthAccount(context.Background(), "telegram", "123456")
+	if err != nil {
+		t.Fatal("old key should still exist")
+	}
+	_, err = s.GetOAuthAccount(context.Background(), "telegram", "99999999999999")
+	if err != nil {
+		t.Fatal("new key should still exist")
+	}
+}
+
+func TestMigrateTelegramID_NothingToMigrate(t *testing.T) {
+	s := mock.New()
+
+	migrated, err := s.MigrateTelegramID(context.Background(), "nonexistent", "99999999999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated {
+		t.Fatal("expected no migration when bot API ID does not exist")
+	}
+}

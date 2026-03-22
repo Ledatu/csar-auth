@@ -429,6 +429,57 @@ func (s *Store) CountOAuthAccounts(ctx context.Context, userID uuid.UUID) (int, 
 	return count, nil
 }
 
+// --- Telegram ID migration ---
+
+func (s *Store) MigrateTelegramID(ctx context.Context, botAPIID, oidcSub string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin telegram ID migration tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Check whether the OIDC sub already exists.
+	var existingUserID *uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT user_id FROM oauth_accounts
+		 WHERE provider = 'telegram' AND provider_user_id = $1`,
+		oidcSub,
+	).Scan(&existingUserID)
+	oidcExists := err == nil
+
+	if oidcExists {
+		// The OIDC sub is already linked. Delete the stale bot API entry
+		// only if it points to the same user (avoid cross-user damage).
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM oauth_accounts
+			 WHERE provider = 'telegram' AND provider_user_id = $1 AND user_id = $2`,
+			botAPIID, existingUserID,
+		)
+		if err != nil {
+			return false, fmt.Errorf("deleting stale bot API entry: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("committing stale cleanup: %w", err)
+		}
+		return tag.RowsAffected() > 0, nil
+	}
+
+	// OIDC sub does not exist yet -- rename the bot API entry.
+	tag, err := tx.Exec(ctx,
+		`UPDATE oauth_accounts
+		 SET provider_user_id = $2, updated_at = now()
+		 WHERE provider = 'telegram' AND provider_user_id = $1`,
+		botAPIID, oidcSub,
+	)
+	if err != nil {
+		return false, fmt.Errorf("migrating telegram ID: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("committing telegram ID migration: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // --- Account Merge ---
 
 func (s *Store) CreateMergeRecord(ctx context.Context, rec *store.MergeRecord) error {
