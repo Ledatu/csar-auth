@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/markbates/goth/gothic"
 
 	"github.com/ledatu/csar-core/httpx"
@@ -16,19 +15,20 @@ import (
 
 // CallbackHandler returns an http.Handler that completes the OAuth flow.
 // It handles two intents:
-//   - "login" (default): lookup-or-create user, issue JWT
+//   - "login" (default): lookup-or-create user, create server-side session
 //   - "link": link the provider to an already-authenticated user
 func CallbackHandler(
 	st store.Store,
-	sessionMgr *session.Manager,
+	jwtMgr *session.Manager,
+	sessMgr *session.SessionManager,
 	oauthMgr *Manager,
 	cookieName string,
+	cookieDomain string,
 	cookieSecure bool,
 	cookieSameSite http.SameSite,
 	logger *slog.Logger,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set the provider in the query so Goth can find it.
 		provider := extractProvider(r)
 		if provider == "" {
 			http.Error(w, "missing provider", http.StatusBadRequest)
@@ -38,10 +38,8 @@ func CallbackHandler(
 		q.Set("provider", provider)
 		r.URL.RawQuery = q.Encode()
 
-		// Read intent before CompleteUserAuth — it clears the Goth session.
 		intent, _ := gothic.GetFromSession("intent", r)
 
-		// Complete the OAuth exchange.
 		gothUser, err := gothic.CompleteUserAuth(w, r)
 		if err != nil {
 			logger.Error("oauth callback failed", "provider", provider, "error", err)
@@ -55,10 +53,8 @@ func CallbackHandler(
 			"email", gothUser.Email,
 		)
 
-		// Determine email verification status.
 		emailVerified := ExtractEmailVerified(gothUser, oauthMgr.IsTrusted(provider))
 
-		// Build the OAuth account from the Goth user.
 		acct := &store.OAuthAccount{
 			Provider:       gothUser.Provider,
 			ProviderUserID: gothUser.UserID,
@@ -74,7 +70,6 @@ func CallbackHandler(
 			acct.ExpiresAt = &t
 		}
 
-		// Extract phone number (Telegram provides this via OIDC phone scope).
 		var phone string
 		if pn, ok := gothUser.RawData["phone_number"]; ok {
 			if s, ok := pn.(string); ok {
@@ -83,22 +78,21 @@ func CallbackHandler(
 		}
 
 		if intent == "link" {
-			handleLinkCallback(w, r, st, sessionMgr, oauthMgr, cookieName, acct, phone, provider, logger)
+			handleLinkCallback(w, r, st, sessMgr, oauthMgr, cookieName, acct, phone, provider, logger)
 			return
 		}
 
-		// Default: login flow.
-		handleLoginCallback(w, r, st, sessionMgr, oauthMgr, cookieName, cookieSecure, cookieSameSite, acct, gothUser.Email, phone, gothUser.Name, gothUser.AvatarURL, provider, logger)
+		handleLoginCallback(w, r, st, sessMgr, oauthMgr, cookieName, cookieDomain, cookieSecure, cookieSameSite, acct, gothUser.Email, phone, gothUser.Name, gothUser.AvatarURL, provider, logger)
 	})
 }
 
-// handleLoginCallback handles the default login/register flow.
 func handleLoginCallback(
 	w http.ResponseWriter, r *http.Request,
 	st store.Store,
-	sessionMgr *session.Manager,
+	sessMgr *session.SessionManager,
 	oauthMgr *Manager,
 	cookieName string,
+	cookieDomain string,
 	cookieSecure bool,
 	cookieSameSite http.SameSite,
 	acct *store.OAuthAccount,
@@ -135,23 +129,22 @@ func handleLoginCallback(
 		logger.Info("existing user authenticated", "user_id", user.ID, "email", user.Email)
 	}
 
-	// Issue JWT.
-	token, err := sessionMgr.IssueToken(user.ID.String(), user.Email, user.DisplayName)
+	sess, err := sessMgr.Create(r.Context(), user.ID, r.UserAgent(), r.RemoteAddr)
 	if err != nil {
-		logger.Error("token issuance failed", "error", err)
+		logger.Error("session creation failed", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Set session cookie.
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
-		Value:    token,
+		Value:    sess.ID,
 		Path:     "/",
+		Domain:   cookieDomain,
 		HttpOnly: true,
 		Secure:   cookieSecure,
 		SameSite: cookieSameSite,
-		MaxAge:   int(sessionMgr.TTL().Seconds()),
+		MaxAge:   sessMgr.CookieMaxAge(sess),
 	})
 
 	http.Redirect(w, r, frontendURL, http.StatusTemporaryRedirect)
@@ -162,7 +155,7 @@ func handleLoginCallback(
 func handleLinkCallback(
 	w http.ResponseWriter, r *http.Request,
 	st store.Store,
-	sessionMgr *session.Manager,
+	sessMgr *session.SessionManager,
 	oauthMgr *Manager,
 	cookieName string,
 	acct *store.OAuthAccount,
@@ -174,7 +167,6 @@ func handleLinkCallback(
 		frontendURL = "/"
 	}
 
-	// Verify the user is authenticated.
 	cookie, err := r.Cookie(cookieName)
 	if err != nil {
 		logger.Warn("link callback without session cookie", "provider", provider)
@@ -183,7 +175,7 @@ func handleLinkCallback(
 		return
 	}
 
-	claims, err := sessionMgr.VerifyToken(cookie.Value)
+	sess, err := sessMgr.Validate(r.Context(), cookie.Value)
 	if err != nil {
 		logger.Warn("link callback with invalid session", "provider", provider, "error", err)
 		redirectURL := httpx.AppendQuery(frontendURL, "error", "invalid_session")
@@ -191,14 +183,8 @@ func handleLinkCallback(
 		return
 	}
 
-	userID, err := uuid.Parse(claims.Sub)
-	if err != nil {
-		logger.Error("invalid user id in session", "sub", claims.Sub)
-		http.Error(w, "invalid session", http.StatusUnauthorized)
-		return
-	}
+	userID := sess.UserID
 
-	// Link the provider account to the authenticated user.
 	if err := st.LinkOAuthAccount(r.Context(), userID, acct); err != nil {
 		if errors.Is(err, store.ErrProviderAlreadyLinked) {
 			logger.Warn("provider account already linked to another user",
@@ -214,7 +200,6 @@ func handleLinkCallback(
 		return
 	}
 
-	// If the provider supplied a phone and the user doesn't have one, store it.
 	if phone != "" {
 		user, err := st.GetUserByID(r.Context(), userID)
 		if err == nil && user.Phone == "" {

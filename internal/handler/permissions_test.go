@@ -9,8 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-authn/internal/session"
+	"github.com/ledatu/csar-authn/internal/store"
+	"github.com/ledatu/csar-authn/internal/store/mock"
 	"github.com/ledatu/csar-core/authnconfig"
 	"github.com/ledatu/csar-core/jwtx"
 	pb "github.com/ledatu/csar-proto/csar/authz/v1"
@@ -53,7 +57,11 @@ type testHarness struct {
 	handler    *Handler
 	sessionMgr *session.Manager
 	mock       *mockAuthzClient
+	store      *mock.Store
 }
+
+// testUserID is a fixed UUID for the test user.
+var testUserID = uuid.MustParse("00000000-0000-4000-8000-000000000001")
 
 func newTestHarness(t *testing.T) *testHarness {
 	t.Helper()
@@ -70,23 +78,29 @@ func newTestHarness(t *testing.T) *testHarness {
 	}
 	sm := session.NewManager(kp, jwtCfg)
 
-	mock := &mockAuthzClient{}
+	authzMock := &mockAuthzClient{}
+	st := mock.New()
 
 	h := &Handler{
+		store:       st,
 		sessionMgr:  sm,
-		authzClient: &AuthzClient{client: mock, logger: slog.Default()},
+		authzClient: &AuthzClient{client: authzMock, logger: slog.Default()},
 		logger:      slog.Default(),
 	}
 	h.cfg.Store(&config.Config{
 		Cookie: config.CookieConfig{Name: "session"},
 	})
 
-	return &testHarness{handler: h, sessionMgr: sm, mock: mock}
+	return &testHarness{handler: h, sessionMgr: sm, mock: authzMock, store: st}
 }
 
-func (th *testHarness) issueToken(t *testing.T, userID string) string {
+func (th *testHarness) issueToken(t *testing.T, userID uuid.UUID) string {
 	t.Helper()
-	tok, err := th.sessionMgr.IssueToken(userID, "test@example.com", "Test User")
+	th.store.SeedUser(&store.User{
+		ID:    userID,
+		Email: "test@example.com",
+	})
+	tok, err := th.sessionMgr.IssueToken(userID.String(), "test@example.com", "Test User")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +195,7 @@ func setupStandardMock(mock *mockAuthzClient) {
 func TestPermissions_FullDiscovery(t *testing.T) {
 	th := newTestHarness(t)
 	setupStandardMock(th.mock)
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.permissionsRequest(t, token, "")
 	if w.Code != http.StatusOK {
@@ -193,8 +207,8 @@ func TestPermissions_FullDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if resp.Subject != "user-1" {
-		t.Errorf("subject = %q, want %q", resp.Subject, "user-1")
+	if resp.Subject != testUserID.String() {
+		t.Errorf("subject = %q, want %q", resp.Subject, testUserID.String())
 	}
 	if resp.Platform == nil {
 		t.Fatal("platform is nil")
@@ -220,7 +234,7 @@ func TestPermissions_FullDiscovery(t *testing.T) {
 func TestPermissions_ScopedPlatform(t *testing.T) {
 	th := newTestHarness(t)
 	setupStandardMock(th.mock)
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.permissionsRequest(t, token, "scope_type=platform")
 	if w.Code != http.StatusOK {
@@ -246,7 +260,7 @@ func TestPermissions_ScopedPlatform(t *testing.T) {
 func TestPermissions_ScopedTenant(t *testing.T) {
 	th := newTestHarness(t)
 	setupStandardMock(th.mock)
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.permissionsRequest(t, token, "scope_type=tenant&scope_id=t-123")
 	if w.Code != http.StatusOK {
@@ -273,7 +287,7 @@ func TestPermissions_ScopedTenant(t *testing.T) {
 func TestPermissions_TenantWithoutScopeID(t *testing.T) {
 	th := newTestHarness(t)
 	setupStandardMock(th.mock)
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.permissionsRequest(t, token, "scope_type=tenant")
 	if w.Code != http.StatusBadRequest {
@@ -284,7 +298,7 @@ func TestPermissions_TenantWithoutScopeID(t *testing.T) {
 func TestPermissions_InvalidScopeType(t *testing.T) {
 	th := newTestHarness(t)
 	setupStandardMock(th.mock)
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.permissionsRequest(t, token, "scope_type=invalid")
 	if w.Code != http.StatusBadRequest {
@@ -310,7 +324,7 @@ func TestPermissions_NoAssignments(t *testing.T) {
 	th.mock.listSubjectScopesFn = func(_ context.Context, _ *pb.ListSubjectScopesRequest) (*pb.ListSubjectScopesResponse, error) {
 		return &pb.ListSubjectScopesResponse{}, nil
 	}
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.permissionsRequest(t, token, "")
 	if w.Code != http.StatusOK {
@@ -338,7 +352,7 @@ func TestCheck_WithScopeParams(t *testing.T) {
 		capturedReq = req
 		return &pb.CheckAccessResponse{Allowed: true, MatchedRoles: []string{"platform_admin"}}, nil
 	}
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.checkRequest(t, token, "resource=/admin&action=GET&scope_type=platform")
 	if w.Code != http.StatusOK {
@@ -348,8 +362,8 @@ func TestCheck_WithScopeParams(t *testing.T) {
 	if capturedReq.ScopeType != "platform" {
 		t.Errorf("scope_type = %q, want %q", capturedReq.ScopeType, "platform")
 	}
-	if capturedReq.Subject != "user-1" {
-		t.Errorf("subject = %q, want %q", capturedReq.Subject, "user-1")
+	if capturedReq.Subject != testUserID.String() {
+		t.Errorf("subject = %q, want %q", capturedReq.Subject, testUserID.String())
 	}
 }
 
@@ -361,7 +375,7 @@ func TestCheck_WithTenantScope(t *testing.T) {
 		capturedReq = req
 		return &pb.CheckAccessResponse{Allowed: true}, nil
 	}
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.checkRequest(t, token, "resource=/tenants/t-123/members&action=GET&scope_type=tenant&scope_id=t-123")
 	if w.Code != http.StatusOK {
@@ -384,7 +398,7 @@ func TestCheck_WithoutScope(t *testing.T) {
 		capturedReq = req
 		return &pb.CheckAccessResponse{Allowed: false}, nil
 	}
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.checkRequest(t, token, "resource=/data&action=GET")
 	if w.Code != http.StatusOK {
@@ -402,7 +416,7 @@ func TestCheck_WithoutScope(t *testing.T) {
 func TestCheck_InvalidScopeType(t *testing.T) {
 	th := newTestHarness(t)
 	setupStandardMock(th.mock)
-	token := th.issueToken(t, "user-1")
+	token := th.issueToken(t, testUserID)
 
 	w := th.checkRequest(t, token, "resource=/data&action=GET&scope_type=bad")
 	if w.Code != http.StatusBadRequest {

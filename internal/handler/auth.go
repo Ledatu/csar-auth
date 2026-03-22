@@ -1,0 +1,79 @@
+package handler
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"github.com/ledatu/csar-core/httpx"
+
+	"github.com/ledatu/csar-authn/internal/store"
+)
+
+// sessionCookie builds an http.Cookie with the standard session attributes.
+// value and maxAge vary per call site; everything else is from config.
+func (h *Handler) sessionCookie(value string, maxAge int) *http.Cookie {
+	cfg := h.cfg.Load()
+	return &http.Cookie{
+		Name:     cfg.Cookie.Name,
+		Value:    value,
+		Path:     "/",
+		Domain:   cfg.Cookie.Domain,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   cfg.Cookie.Secure,
+		SameSite: httpx.ParseSameSite(cfg.Cookie.SameSite),
+	}
+}
+
+// resolveAuth resolves the caller's identity from either:
+//  1. Authorization: Bearer <jwt> header
+//  2. Session cookie (opaque session ID)
+//
+// Returns (session, user, true) on success. session is nil for Bearer auth.
+// Does NOT write to ResponseWriter — callers handle error responses.
+func (h *Handler) resolveAuth(r *http.Request) (*store.Session, *store.User, bool) {
+	cfg := h.cfg.Load()
+
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		claims, err := h.sessionMgr.VerifyToken(strings.TrimPrefix(auth, "Bearer "))
+		if err == nil {
+			if userID, err := uuid.Parse(claims.Sub); err == nil {
+				if user, err := h.store.GetUserByID(r.Context(), userID); err == nil {
+					return nil, user, true
+				}
+			}
+		}
+	}
+
+	cookie, err := r.Cookie(cfg.Cookie.Name)
+	if err != nil {
+		return nil, nil, false
+	}
+	sess, err := h.sessMgr.Validate(r.Context(), cookie.Value)
+	if err != nil {
+		return nil, nil, false
+	}
+	user, err := h.store.GetUserByID(r.Context(), sess.UserID)
+	if err != nil {
+		return nil, nil, false
+	}
+	return sess, user, true
+}
+
+// authenticateRequest validates the caller via Bearer JWT or session cookie.
+// On success for cookie auth it refreshes the cookie's MaxAge in the response.
+// Returns (session, user, true) for cookie auth or (nil, user, true) for Bearer.
+// On failure it writes an HTTP error and returns (nil, nil, false).
+func (h *Handler) authenticateRequest(w http.ResponseWriter, r *http.Request) (*store.Session, *store.User, bool) {
+	sess, user, ok := h.resolveAuth(r)
+	if !ok {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return nil, nil, false
+	}
+	if sess != nil {
+		http.SetCookie(w, h.sessionCookie(sess.ID, h.sessMgr.CookieMaxAge(sess)))
+	}
+	return sess, user, true
+}

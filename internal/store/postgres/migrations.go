@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS service_accounts (
 );
 `,
 	},
+	{
+		Name: "007_sessions",
+		Up: `
+CREATE TABLE sessions (
+    id           TEXT PRIMARY KEY,
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    user_agent   TEXT NOT NULL DEFAULT '',
+    ip_address   TEXT NOT NULL DEFAULT '',
+    revoked_at   TIMESTAMPTZ
+);
+CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_expires ON sessions(expires_at) WHERE revoked_at IS NULL;
+`,
+	},
 }
 
 // runMigrations applies pending schema migrations using the shared runner.

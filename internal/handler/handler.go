@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/google/uuid"
-
 	"github.com/ledatu/csar-core/audit"
 	"github.com/ledatu/csar-core/httpx"
 
@@ -25,6 +23,7 @@ import (
 type Handler struct {
 	store       store.Store
 	sessionMgr  *session.Manager
+	sessMgr     *session.SessionManager
 	oauthMgr    *oauth.Manager
 	stsHandler  *sts.Handler // nil when STS is not configured
 	authzClient *AuthzClient // nil when authz is not configured
@@ -35,10 +34,11 @@ type Handler struct {
 
 // New creates a Handler with all dependencies.
 // stsHandler, authzClient, and auditStore may be nil when their features are not enabled.
-func New(st store.Store, sessionMgr *session.Manager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, auditStore audit.Store, logger *slog.Logger, cfg *config.Config) *Handler {
+func New(st store.Store, sessionMgr *session.Manager, sessMgr *session.SessionManager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, auditStore audit.Store, logger *slog.Logger, cfg *config.Config) *Handler {
 	h := &Handler{
 		store:       st,
 		sessionMgr:  sessionMgr,
+		sessMgr:     sessMgr,
 		oauthMgr:    oauthMgr,
 		stsHandler:  stsHandler,
 		authzClient: authzClient,
@@ -71,8 +71,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /auth/{provider}/callback", oauth.CallbackHandler(
 		h.store,
 		h.sessionMgr,
+		h.sessMgr,
 		h.oauthMgr,
 		cfg.Cookie.Name,
+		cfg.Cookie.Domain,
 		cfg.Cookie.Secure,
 		cookieSameSite,
 		h.logger,
@@ -83,6 +85,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Current user info: GET /auth/me
 	mux.HandleFunc("GET /auth/me", h.handleMe)
+
+	// Session validation for router subrequests: GET /auth/validate
+	mux.HandleFunc("GET /auth/validate", h.handleValidate)
 
 	// JWKS endpoint: GET /.well-known/jwks.json
 	mux.Handle("GET /.well-known/jwks.json", session.JWKSHandler(h.sessionMgr))
@@ -111,52 +116,27 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfg.Load()
-	http.SetCookie(w, &http.Cookie{
-		Name:     cfg.Cookie.Name,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   cfg.Cookie.Secure,
-		SameSite: httpx.ParseSameSite(cfg.Cookie.SameSite),
-		MaxAge:   -1, // delete immediately
-	})
+
+	// Revoke directly by cookie value — no need to validate (and risk
+	// extending) the session on the way out.
+	if cookie, err := r.Cookie(cfg.Cookie.Name); err == nil {
+		_ = h.sessMgr.Revoke(r.Context(), cookie.Value)
+	}
+
+	http.SetCookie(w, h.sessionCookie("", -1))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfg.Load()
-	cookie, err := r.Cookie(cfg.Cookie.Name)
-	if err != nil {
-		http.Error(w, "not authenticated", http.StatusUnauthorized)
+	_, user, ok := h.authenticateRequest(w, r)
+	if !ok {
 		return
 	}
 
-	claims, err := h.sessionMgr.VerifyToken(cookie.Value)
-	if err != nil {
-		h.logger.Warn("invalid session token on /auth/me", "error", err)
-		http.Error(w, "invalid session", http.StatusUnauthorized)
-		return
-	}
-
-	userID, err := uuid.Parse(claims.Sub)
-	if err != nil {
-		http.Error(w, "invalid session", http.StatusUnauthorized)
-		return
-	}
-
-	// Fetch the full user from the store.
-	user, err := h.store.GetUserByID(r.Context(), userID)
-	if err != nil {
-		h.logger.Error("failed to fetch user for /me", "user_id", claims.Sub, "error", err)
-		http.Error(w, "user not found", http.StatusNotFound)
-		return
-	}
-
-	// Fetch linked accounts.
 	accounts, err := h.store.GetOAuthAccountsByUserID(r.Context(), user.ID)
 	if err != nil {
 		h.logger.Error("failed to fetch oauth accounts", "user_id", user.ID, "error", err)
-		accounts = nil // non-fatal
+		accounts = nil
 	}
 
 	type linkedAccount struct {
@@ -196,22 +176,8 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfg.Load()
-	cookie, err := r.Cookie(cfg.Cookie.Name)
-	if err != nil {
-		http.Error(w, "not authenticated", http.StatusUnauthorized)
-		return
-	}
-
-	claims, err := h.sessionMgr.VerifyToken(cookie.Value)
-	if err != nil {
-		http.Error(w, "invalid session", http.StatusUnauthorized)
-		return
-	}
-
-	userID, err := uuid.Parse(claims.Sub)
-	if err != nil {
-		http.Error(w, "invalid session", http.StatusUnauthorized)
+	_, user, ok := h.authenticateRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -221,10 +187,9 @@ func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Guard: cannot unlink the last provider.
-	count, err := h.store.CountOAuthAccounts(r.Context(), userID)
+	count, err := h.store.CountOAuthAccounts(r.Context(), user.ID)
 	if err != nil {
-		h.logger.Error("failed to count oauth accounts", "user_id", userID, "error", err)
+		h.logger.Error("failed to count oauth accounts", "user_id", user.ID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -233,12 +198,40 @@ func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.DeleteOAuthAccount(r.Context(), provider, userID); err != nil {
-		h.logger.Error("failed to unlink provider", "user_id", userID, "provider", provider, "error", err)
+	if err := h.store.DeleteOAuthAccount(r.Context(), provider, user.ID); err != nil {
+		h.logger.Error("failed to unlink provider", "user_id", user.ID, "provider", provider, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	h.logger.Info("provider unlinked", "user_id", userID, "provider", provider)
+	h.logger.Info("provider unlinked", "user_id", user.ID, "provider", provider)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleValidate is a lightweight session check for router subrequests.
+// Returns 200 with X-User-ID / X-User-Email headers, or 401.
+// Does NOT set cookies (response goes to the router, not the browser).
+func (h *Handler) handleValidate(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg.Load()
+	cookie, err := r.Cookie(cfg.Cookie.Name)
+	if err != nil {
+		http.Error(w, "missing session", http.StatusUnauthorized)
+		return
+	}
+
+	sess, err := h.sessMgr.Validate(r.Context(), cookie.Value)
+	if err != nil {
+		http.Error(w, "session expired", http.StatusUnauthorized)
+		return
+	}
+
+	user, err := h.store.GetUserByID(r.Context(), sess.UserID)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusUnauthorized)
+		return
+	}
+
+	w.Header().Set("X-User-ID", user.ID.String())
+	w.Header().Set("X-User-Email", user.Email)
+	w.WriteHeader(http.StatusOK)
 }

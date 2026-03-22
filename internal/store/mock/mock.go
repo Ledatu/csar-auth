@@ -19,6 +19,7 @@ type Store struct {
 	users           map[uuid.UUID]*store.User
 	accounts        map[string]*store.OAuthAccount   // key: provider|provider_user_id
 	serviceAccounts map[string]*store.ServiceAccount // key: name
+	sessions        map[string]*store.Session        // key: session ID
 }
 
 // New returns a new mock Store.
@@ -327,6 +328,95 @@ func (s *Store) RevokeServiceAccount(_ context.Context, name string) error {
 	now := time.Now()
 	sa.RevokedAt = &now
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Session methods
+// ---------------------------------------------------------------------------
+
+func (s *Store) CreateSession(_ context.Context, sess *store.Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*store.Session)
+	}
+	cp := *sess
+	s.sessions[sess.ID] = &cp
+	return nil
+}
+
+func (s *Store) GetSession(_ context.Context, sessionID string) (*store.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *sess
+	return &cp, nil
+}
+
+func (s *Store) TouchSession(_ context.Context, sessionID string, now time.Time, newExpiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	sess.LastSeenAt = now
+	sess.ExpiresAt = newExpiresAt
+	return nil
+}
+
+func (s *Store) RevokeSession(_ context.Context, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now()
+	sess.RevokedAt = &now
+	return nil
+}
+
+func (s *Store) RevokeUserSessions(_ context.Context, userID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, sess := range s.sessions {
+		if sess.UserID == userID && sess.RevokedAt == nil {
+			sess.RevokedAt = &now
+		}
+	}
+	return nil
+}
+
+func (s *Store) DeleteExpiredSessions(_ context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var n int64
+	for id, sess := range s.sessions {
+		if sess.RevokedAt != nil || now.After(sess.ExpiresAt) {
+			delete(s.sessions, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *Store) ListUserSessions(_ context.Context, userID uuid.UUID) ([]store.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var out []store.Session
+	for _, sess := range s.sessions {
+		if sess.UserID == userID && sess.RevokedAt == nil && now.Before(sess.ExpiresAt) {
+			out = append(out, *sess)
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) Migrate(_ context.Context) error { return nil }

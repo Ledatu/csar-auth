@@ -55,6 +55,18 @@ type OAuthAccount struct {
 	UpdatedAt      time.Time
 }
 
+// Session represents a server-side session backed by the sessions table.
+type Session struct {
+	ID         string
+	UserID     uuid.UUID
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
+	UserAgent  string
+	IPAddress  string
+	RevokedAt  *time.Time
+}
+
 // ServiceAccount represents an STS service account stored in the database.
 type ServiceAccount struct {
 	Name              string
@@ -138,6 +150,28 @@ type Store interface {
 	// RevokeServiceAccount soft-deletes a service account by setting status to "revoked".
 	// Returns ErrNotFound if the service account does not exist.
 	RevokeServiceAccount(ctx context.Context, name string) error
+
+	// CreateSession inserts a new session row.
+	CreateSession(ctx context.Context, s *Session) error
+
+	// GetSession returns a session by ID. Returns ErrNotFound if missing.
+	GetSession(ctx context.Context, sessionID string) (*Session, error)
+
+	// TouchSession updates last_seen_at and expires_at for an active session.
+	TouchSession(ctx context.Context, sessionID string, now time.Time, newExpiresAt time.Time) error
+
+	// RevokeSession marks a session as revoked.
+	RevokeSession(ctx context.Context, sessionID string) error
+
+	// RevokeUserSessions revokes all active sessions for a user ("log out everywhere").
+	RevokeUserSessions(ctx context.Context, userID uuid.UUID) error
+
+	// DeleteExpiredSessions purges sessions that are expired or revoked.
+	// Returns the number of rows deleted.
+	DeleteExpiredSessions(ctx context.Context) (int64, error)
+
+	// ListUserSessions returns all non-revoked, non-expired sessions for a user.
+	ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
 
 	// Migrate runs schema migrations (idempotent).
 	Migrate(ctx context.Context) error

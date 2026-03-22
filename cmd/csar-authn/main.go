@@ -138,6 +138,19 @@ func run(
 
 	sessionMgr := session.NewManager(keys, cfg.JWT)
 
+	sessMgr := session.NewSessionManager(
+		st,
+		logger,
+		cfg.Session.MaxAge.Std(),
+		cfg.Session.IdleTimeout.Std(),
+		cfg.Session.TouchThreshold.Std(),
+	)
+	logger.Info("session manager initialized",
+		"max_age", cfg.Session.MaxAge.Std(),
+		"idle_timeout", cfg.Session.IdleTimeout.Std(),
+		"touch_threshold", cfg.Session.TouchThreshold.Std(),
+	)
+
 	oauthMgr, err := oauth.NewManager(cfg, logger)
 	if err != nil {
 		return fmt.Errorf("initializing oauth: %w", err)
@@ -154,7 +167,8 @@ func run(
 	// Optional authz client for permissions endpoints.
 	var authzClient *handler.AuthzClient
 	if cfg.Authz.Enabled {
-		authzClient, err = handler.NewAuthzClient(cfg.Authz.Endpoint, cfg.Authz.TLS, logger.With("component", "authz-client"))
+		tokenSrc := handler.NewServiceTokenSource(sessionMgr, "svc:csar-authn", []string{cfg.JWT.Audience}, 5*time.Minute)
+		authzClient, err = handler.NewAuthzClient(cfg.Authz.Endpoint, cfg.Authz.TLS, tokenSrc, logger.With("component", "authz-client"))
 		if err != nil {
 			return fmt.Errorf("connecting to authz service: %w", err)
 		}
@@ -175,7 +189,7 @@ func run(
 
 	// --- Routes ---
 	mux := http.NewServeMux()
-	h := handler.New(st, sessionMgr, oauthMgr, stsHandler, authzClient, auditStore, logger, cfg)
+	h := handler.New(st, sessionMgr, sessMgr, oauthMgr, stsHandler, authzClient, auditStore, logger, cfg)
 	h.RegisterRoutes(mux)
 
 	// Health and readiness endpoints.
@@ -191,6 +205,25 @@ func run(
 		})
 	}
 	mux.Handle("GET /readiness", rc.Handler())
+
+	// --- Session cleanup ---
+	go func() {
+		ticker := time.NewTicker(cfg.Session.CleanupInterval.Std())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				n, err := st.DeleteExpiredSessions(ctx)
+				if err != nil {
+					logger.Error("session cleanup failed", "error", err)
+				} else if n > 0 {
+					logger.Info("session cleanup", "deleted", n)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// --- Middleware ---
 	stack := httpmiddleware.Chain(

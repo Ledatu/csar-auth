@@ -15,8 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-authn/internal/session"
+	"github.com/ledatu/csar-authn/internal/store"
 	"github.com/ledatu/csar-authn/internal/store/mock"
 	"github.com/ledatu/csar-core/audit"
 	"github.com/ledatu/csar-core/authnconfig"
@@ -113,9 +116,16 @@ func newSATestHarness(t *testing.T) *saTestHarness {
 	}
 }
 
-func (th *saTestHarness) issueToken(t *testing.T, userID string) string {
+// saTestUserID is a fixed UUID for the SA test admin user.
+var saTestUserID = uuid.MustParse("00000000-0000-4000-8000-000000000002")
+
+func (th *saTestHarness) issueToken(t *testing.T, userID uuid.UUID) string {
 	t.Helper()
-	tok, err := th.sessionMgr.IssueToken(userID, "admin@test.com", "Admin")
+	th.store.SeedUser(&store.User{
+		ID:    userID,
+		Email: "admin@test.com",
+	})
+	tok, err := th.sessionMgr.IssueToken(userID.String(), "admin@test.com", "Admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +134,7 @@ func (th *saTestHarness) issueToken(t *testing.T, userID string) string {
 
 func TestSA_CreateAndList(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 	pemStr := testPEM(t)
 
 	body, _ := json.Marshal(createSARequest{
@@ -177,7 +187,7 @@ func TestSA_CreateAndList(t *testing.T) {
 
 func TestSA_GetDetail(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 	pemStr := testPEM(t)
 
 	body, _ := json.Marshal(createSARequest{
@@ -215,7 +225,7 @@ func TestSA_GetDetail(t *testing.T) {
 
 func TestSA_Revoke(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 
 	body, _ := json.Marshal(createSARequest{
 		Name:             "revoke-sa",
@@ -254,7 +264,7 @@ func TestSA_Revoke(t *testing.T) {
 
 func TestSA_Rotate(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 
 	body, _ := json.Marshal(createSARequest{
 		Name:             "rotate-sa",
@@ -300,7 +310,7 @@ func TestSA_PermissionDenied(t *testing.T) {
 	th.mock.checkAccessFn = func(_ context.Context, _ *pb.CheckAccessRequest) (*pb.CheckAccessResponse, error) {
 		return &pb.CheckAccessResponse{Allowed: false}, nil
 	}
-	token := th.issueToken(t, "unprivileged")
+	token := th.issueToken(t, uuid.MustParse("00000000-0000-4000-8000-000000000099"))
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/service-accounts", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -326,7 +336,7 @@ func TestSA_Unauthenticated(t *testing.T) {
 
 func TestSA_AuditRecorded(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 
 	body, _ := json.Marshal(createSARequest{
 		Name:             "audit-sa",
@@ -352,14 +362,14 @@ func TestSA_AuditRecorded(t *testing.T) {
 	if events[0].TargetID != "audit-sa" {
 		t.Errorf("target_id = %q, want %q", events[0].TargetID, "audit-sa")
 	}
-	if events[0].Actor != "admin-1" {
-		t.Errorf("actor = %q, want %q", events[0].Actor, "admin-1")
+	if events[0].Actor != saTestUserID.String() {
+		t.Errorf("actor = %q, want %q", events[0].Actor, saTestUserID.String())
 	}
 }
 
 func TestSA_InvalidPEMRejected(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 
 	body, _ := json.Marshal(createSARequest{
 		Name:             "bad-pem-sa",
@@ -379,7 +389,7 @@ func TestSA_InvalidPEMRejected(t *testing.T) {
 
 func TestSA_GetNotFound(t *testing.T) {
 	th := newSATestHarness(t)
-	token := th.issueToken(t, "admin-1")
+	token := th.issueToken(t, saTestUserID)
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/service-accounts/nonexistent", nil)
 	req.SetPathValue("name", "nonexistent")

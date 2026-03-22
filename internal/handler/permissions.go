@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-core/tlsx"
@@ -25,8 +24,9 @@ type AuthzClient struct {
 
 // NewAuthzClient connects to csar-authz at the given endpoint.
 // When tlsCfg.Enabled is true it establishes a TLS (optionally mTLS) connection;
-// otherwise plaintext gRPC is used.
-func NewAuthzClient(endpoint string, tlsCfg config.AuthzTLSConfig, logger *slog.Logger) (*AuthzClient, error) {
+// otherwise plaintext gRPC is used. If tokenSource is non-nil, every RPC
+// automatically carries a Bearer token via the authorization metadata header.
+func NewAuthzClient(endpoint string, tlsCfg config.AuthzTLSConfig, tokenSource credentials.PerRPCCredentials, logger *slog.Logger) (*AuthzClient, error) {
 	var opts []grpc.DialOption
 	if !tlsCfg.Enabled {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -40,6 +40,10 @@ func NewAuthzClient(endpoint string, tlsCfg config.AuthzTLSConfig, logger *slog.
 			return nil, fmt.Errorf("building authz TLS config: %w", err)
 		}
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
+	}
+
+	if tokenSource != nil {
+		opts = append(opts, grpc.WithPerRPCCredentials(tokenSource))
 	}
 
 	conn, err := grpc.NewClient(endpoint, opts...)
@@ -267,31 +271,14 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// extractSubject returns the user's subject ID from either:
-// 1. Authorization: Bearer <token> header (verified via sessionMgr)
-// 2. Session cookie
-// Returns empty string if not authenticated.
+// extractSubject returns the user's subject ID from either Bearer JWT or
+// session cookie. Returns empty string if not authenticated.
 func (h *Handler) extractSubject(r *http.Request) string {
-	// Try Authorization header first (for API clients like csar-ts).
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		claims, err := h.sessionMgr.VerifyToken(token)
-		if err == nil {
-			return claims.Sub
-		}
-		h.logger.Debug("bearer token verification failed", "error", err)
-	}
-
-	// Fall back to session cookie.
-	cookie, err := r.Cookie(h.cfg.Load().Cookie.Name)
-	if err != nil {
+	_, user, ok := h.resolveAuth(r)
+	if !ok {
 		return ""
 	}
-	claims, err := h.sessionMgr.VerifyToken(cookie.Value)
-	if err != nil {
-		return ""
-	}
-	return claims.Sub
+	return user.ID.String()
 }
 
 // collectEffectiveRoles resolves role hierarchy by walking parent roles.
