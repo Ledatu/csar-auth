@@ -30,6 +30,8 @@ type Manager struct {
 	logger           *slog.Logger
 	baseURL          string
 	frontendURL      string
+	cookieSecure     bool
+	cookieSameSite   http.SameSite
 	trustedProviders map[string]bool
 }
 
@@ -43,6 +45,8 @@ func NewManager(cfg *config.Config, logger *slog.Logger) (*Manager, error) {
 		logger:           logger,
 		baseURL:          cfg.BaseURL,
 		frontendURL:      cfg.FrontendURL,
+		cookieSecure:     cfg.Cookie.Secure,
+		cookieSameSite:   httpx.ParseSameSite(cfg.Cookie.SameSite),
 		trustedProviders: buildTrustedMap(cfg),
 	}, nil
 }
@@ -60,6 +64,8 @@ func (m *Manager) Reload(cfg *config.Config) error {
 	m.trustedProviders = trusted
 	m.frontendURL = cfg.FrontendURL
 	m.baseURL = cfg.BaseURL
+	m.cookieSecure = cfg.Cookie.Secure
+	m.cookieSameSite = httpx.ParseSameSite(cfg.Cookie.SameSite)
 	m.mu.Unlock()
 	return nil
 }
@@ -133,16 +139,35 @@ func (m *Manager) BeginAuthHandler() http.Handler {
 		q.Set("provider", provider)
 		r.URL.RawQuery = q.Encode()
 
-		// Store intent (login or link) in the Goth session for retrieval in callback.
 		intent := r.URL.Query().Get("intent")
+
+		m.logger.Info("oauth initiation", "provider", provider, "intent", intent)
+
 		if intent == "link" {
-			if err := gothic.StoreInSession("intent", "link", r, w); err != nil {
-				m.logger.Error("failed to store intent in session", "error", err)
-			}
+			m.mu.RLock()
+			secure := m.cookieSecure
+			sameSite := m.cookieSameSite
+			m.mu.RUnlock()
+			http.SetCookie(w, &http.Cookie{
+				Name:     "csar_intent",
+				Value:    "link",
+				Path:     "/",
+				MaxAge:   300,
+				HttpOnly: true,
+				Secure:   secure,
+				SameSite: sameSite,
+			})
 		}
 
 		gothic.BeginAuthHandler(w, r)
 	})
+}
+
+// CookieConfig returns the current cookie security settings.
+func (m *Manager) CookieConfig() (secure bool, sameSite http.SameSite) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cookieSecure, m.cookieSameSite
 }
 
 func createProvider(cfg config.ProviderConfig, callbackURL string) (goth.Provider, error) {

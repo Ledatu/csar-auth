@@ -188,6 +188,10 @@ func (s *Store) FindOrCreateUser(ctx context.Context, acct *store.OAuthAccount, 
 		existing.EmailVerified = acct.EmailVerified
 		_ = s.UpdateOAuthAccount(ctx, existing)
 		user, _ := s.GetUserByID(ctx, existing.UserID)
+		if user.Phone == "" && phone != "" {
+			user.Phone = phone
+			_ = s.UpdateUser(ctx, user)
+		}
 		return user, store.ResultExistingLogin, nil
 	}
 

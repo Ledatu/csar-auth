@@ -43,7 +43,23 @@ func CallbackHandler(
 		q.Set("provider", provider)
 		r.URL.RawQuery = q.Encode()
 
-		intent, _ := gothic.GetFromSession("intent", r)
+		// Read intent from dedicated cookie (bypasses fragile Goth session).
+		var intent string
+		if c, err := r.Cookie("csar_intent"); err == nil {
+			intent = c.Value
+		}
+		// Clear the intent cookie immediately.
+		http.SetCookie(w, &http.Cookie{
+			Name:     "csar_intent",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   cookieSecure,
+			SameSite: cookieSameSite,
+		})
+
+		logger.Info("callback intent resolved", "intent", intent, "provider", provider)
 
 		gothUser, err := gothic.CompleteUserAuth(w, r)
 		if err != nil {
@@ -241,12 +257,24 @@ func handleMergeCallback(
 		frontendURL = "/"
 	}
 
-	// Read merge state from Goth session (stored during initiation).
-	mergeTarget, _ := gothic.GetFromSession("merge_target", r)
-	mergeNonce, _ := gothic.GetFromSession("merge_nonce", r)
+	// Read merge_target from dedicated cookie (replaces Goth session).
+	var mergeTarget string
+	if c, err := r.Cookie("csar_merge_target"); err == nil {
+		mergeTarget = c.Value
+	}
+	// Clear the merge_target cookie.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csar_merge_target",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cookieSecure,
+		SameSite: cookieSameSite,
+	})
 
-	if mergeTarget == "" || mergeNonce == "" {
-		logger.Warn("merge callback missing session state", "provider", provider)
+	if mergeTarget == "" {
+		logger.Warn("merge callback missing merge_target cookie", "provider", provider)
 		redirectURL := httpx.AppendQuery(frontendURL, "error", "merge_state_missing")
 		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 		return

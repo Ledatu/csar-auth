@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,7 +19,7 @@ import (
 
 // handleMergeInitiate starts the merge OAuth flow. The user must be
 // authenticated (session cookie proves target user). We store merge
-// state in the Goth session and redirect to the OAuth provider.
+// state in dedicated HttpOnly cookies and redirect to the OAuth provider.
 func (h *Handler) handleMergeInitiate(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 	if provider == "" {
@@ -38,30 +37,26 @@ func (h *Handler) handleMergeInitiate(w http.ResponseWriter, r *http.Request) {
 	q.Set("provider", provider)
 	r.URL.RawQuery = q.Encode()
 
-	// Store merge state in Goth session.
-	if err := gothic.StoreInSession("intent", "merge", r, w); err != nil {
-		h.logger.Error("failed to store merge intent", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if err := gothic.StoreInSession("merge_target", user.ID.String(), r, w); err != nil {
-		h.logger.Error("failed to store merge_target", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+	secure, sameSite := h.oauthMgr.CookieConfig()
 
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		h.logger.Error("failed to generate merge nonce", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	nonceHex := hex.EncodeToString(nonce)
-	if err := gothic.StoreInSession("merge_nonce", nonceHex, r, w); err != nil {
-		h.logger.Error("failed to store merge_nonce", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csar_intent",
+		Value:    "merge",
+		Path:     "/",
+		MaxAge:   300,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csar_merge_target",
+		Value:    user.ID.String(),
+		Path:     "/",
+		MaxAge:   300,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+	})
 
 	h.logger.Info("initiating merge OAuth flow",
 		"target_user", user.ID, "provider", provider,

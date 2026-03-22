@@ -267,6 +267,16 @@ func (s *Store) FindOrCreateUser(ctx context.Context, acct *store.OAuthAccount, 
 		if err != nil {
 			return nil, 0, fmt.Errorf("fetching linked user: %w", err)
 		}
+		if user.Phone == "" && phone != "" {
+			if _, err := s.pool.Exec(ctx,
+				`UPDATE users SET phone = $1, updated_at = now() WHERE id = $2 AND phone IS NULL`,
+				phone, user.ID,
+			); err != nil {
+				s.logger.Warn("failed to backfill phone on login", "user_id", user.ID, "error", err)
+			} else {
+				user.Phone = phone
+			}
+		}
 		return user, store.ResultExistingLogin, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
