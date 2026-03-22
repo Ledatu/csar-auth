@@ -1,10 +1,15 @@
 package oauth
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/markbates/goth/gothic"
 
 	"github.com/ledatu/csar-core/httpx"
@@ -74,6 +79,11 @@ func CallbackHandler(
 
 		if intent == "link" {
 			handleLinkCallback(w, r, st, sessMgr, oauthMgr, cookieName, acct, phone, provider, logger)
+			return
+		}
+
+		if intent == "merge" {
+			handleMergeCallback(w, r, st, sessMgr, oauthMgr, cookieName, cookieSecure, cookieSameSite, acct, provider, logger)
 			return
 		}
 
@@ -182,11 +192,11 @@ func handleLinkCallback(
 
 	if err := st.LinkOAuthAccount(r.Context(), userID, acct); err != nil {
 		if errors.Is(err, store.ErrProviderAlreadyLinked) {
-			logger.Warn("provider account already linked to another user",
+			logger.Warn("provider account already linked to another user — merge available",
 				"provider", provider,
 				"provider_user_id", acct.ProviderUserID,
 			)
-			redirectURL := httpx.AppendQuery(frontendURL, "error", "already_linked", "provider", provider)
+			redirectURL := httpx.AppendQuery(frontendURL, "merge_available", provider)
 			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 			return
 		}
@@ -207,6 +217,127 @@ func handleLinkCallback(
 
 	logger.Info("provider linked to user", "user_id", userID, "provider", provider)
 	redirectURL := httpx.AppendQuery(frontendURL, "linked", provider)
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
+// handleMergeCallback handles the OAuth callback for intent=merge.
+// It verifies the OAuth identity belongs to a different user (source),
+// validates the session cookie matches the merge target, creates a
+// merge record, and sets an HttpOnly cookie with the merge token.
+func handleMergeCallback(
+	w http.ResponseWriter, r *http.Request,
+	st store.Store,
+	sessMgr *session.SessionManager,
+	oauthMgr *Manager,
+	cookieName string,
+	cookieSecure bool,
+	cookieSameSite http.SameSite,
+	acct *store.OAuthAccount,
+	provider string,
+	logger *slog.Logger,
+) {
+	frontendURL := oauthMgr.FrontendURL()
+	if frontendURL == "" {
+		frontendURL = "/"
+	}
+
+	// Read merge state from Goth session (stored during initiation).
+	mergeTarget, _ := gothic.GetFromSession("merge_target", r)
+	mergeNonce, _ := gothic.GetFromSession("merge_nonce", r)
+
+	if mergeTarget == "" || mergeNonce == "" {
+		logger.Warn("merge callback missing session state", "provider", provider)
+		redirectURL := httpx.AppendQuery(frontendURL, "error", "merge_state_missing")
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Validate session cookie — must prove ownership of target user.
+	cookie, err := r.Cookie(cookieName)
+	if err != nil {
+		logger.Warn("merge callback without session cookie", "provider", provider)
+		redirectURL := httpx.AppendQuery(frontendURL, "error", "not_authenticated")
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	sess, err := sessMgr.Validate(r.Context(), cookie.Value)
+	if err != nil {
+		logger.Warn("merge callback with invalid session", "provider", provider, "error", err)
+		redirectURL := httpx.AppendQuery(frontendURL, "error", "invalid_session")
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	targetID := sess.UserID
+
+	// Anti-confusion: session user must match merge_target from Goth session.
+	if targetID.String() != mergeTarget {
+		logger.Warn("merge target mismatch",
+			"session_user", targetID, "merge_target", mergeTarget,
+		)
+		redirectURL := httpx.AppendQuery(frontendURL, "error", "merge_target_mismatch")
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Look up which user owns this OAuth identity (the source).
+	existingAcct, err := st.GetOAuthAccount(r.Context(), acct.Provider, acct.ProviderUserID)
+	if err != nil {
+		logger.Error("merge callback: cannot find source OAuth account", "error", err)
+		redirectURL := httpx.AppendQuery(frontendURL, "error", "merge_source_not_found")
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	sourceID := existingAcct.UserID
+	if sourceID == targetID {
+		logger.Warn("merge callback: source equals target", "user_id", targetID)
+		redirectURL := httpx.AppendQuery(frontendURL, "error", "merge_self")
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Generate a random token; store only its hash.
+	rawToken := make([]byte, 32)
+	if _, err := rand.Read(rawToken); err != nil {
+		logger.Error("failed to generate merge token", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	tokenStr := hex.EncodeToString(rawToken)
+	hash := sha256.Sum256([]byte(tokenStr))
+	tokenHash := hex.EncodeToString(hash[:])
+
+	rec := &store.MergeRecord{
+		ID:         uuid.New(),
+		TokenHash:  tokenHash,
+		SourceUser: sourceID,
+		TargetUser: targetID,
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(5 * time.Minute),
+	}
+	if err := st.CreateMergeRecord(r.Context(), rec); err != nil {
+		logger.Error("failed to create merge record", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Set HttpOnly cookie with the raw token.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csar_merge",
+		Value:    tokenStr,
+		Path:     "/",
+		MaxAge:   300,
+		HttpOnly: true,
+		Secure:   cookieSecure,
+		SameSite: cookieSameSite,
+	})
+
+	logger.Info("merge record created",
+		"source_user", sourceID, "target_user", targetID, "provider", provider,
+	)
+	redirectURL := httpx.AppendQuery(frontendURL, "merge_ready", "true")
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 

@@ -225,6 +225,9 @@ func run(
 		}
 	}()
 
+	// --- Merge authz reconciler ---
+	go h.RunMergeAuthzReconciler(ctx, 60*time.Second)
+
 	// --- Middleware ---
 	stack := httpmiddleware.Chain(
 		httpmiddleware.RequestID,

@@ -41,7 +41,10 @@ func (h *Handler) resolveAuth(r *http.Request) (*store.Session, *store.User, boo
 		if err == nil {
 			if userID, err := uuid.Parse(claims.Sub); err == nil {
 				if user, err := h.store.GetUserByID(r.Context(), userID); err == nil {
-					return nil, user, true
+					user = h.followMerge(r, user)
+					if user != nil {
+						return nil, user, true
+					}
 				}
 			}
 		}
@@ -63,9 +66,40 @@ func (h *Handler) resolveAuth(r *http.Request) (*store.Session, *store.User, boo
 		if err != nil {
 			continue
 		}
-		return sess, user, true
+		user = h.followMerge(r, user)
+		if user != nil {
+			return sess, user, true
+		}
 	}
 	return nil, nil, false
+}
+
+// followMerge walks the merged_into chain until it reaches the canonical
+// (unmerged) account. A hop limit guards against cycles or runaway chains.
+func (h *Handler) followMerge(r *http.Request, user *store.User) *store.User {
+	const maxHops = 5
+	seen := make(map[uuid.UUID]struct{}, maxHops)
+	cur := user
+	for i := 0; i < maxHops; i++ {
+		if cur.MergedInto == nil {
+			return cur
+		}
+		if _, cycle := seen[cur.ID]; cycle {
+			h.logger.Error("merged_into cycle detected", "user", cur.ID)
+			return nil
+		}
+		seen[cur.ID] = struct{}{}
+		next, err := h.store.GetUserByID(r.Context(), *cur.MergedInto)
+		if err != nil {
+			h.logger.Warn("merged_into target not found",
+				"source", cur.ID, "target", *cur.MergedInto, "error", err,
+			)
+			return nil
+		}
+		cur = next
+	}
+	h.logger.Error("merged_into chain exceeded hop limit", "user", user.ID)
+	return nil
 }
 
 // authenticateRequest validates the caller via Bearer JWT or session cookie.

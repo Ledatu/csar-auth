@@ -110,6 +110,26 @@ CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_expires ON sessions(expires_at) WHERE revoked_at IS NULL;
 `,
 	},
+	{
+		Name: "008_account_merge",
+		Up: `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS merged_into UUID REFERENCES users(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS merged_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS merge_records (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    token_hash         TEXT NOT NULL UNIQUE,
+    source_user        UUID NOT NULL REFERENCES users(id),
+    target_user        UUID NOT NULL REFERENCES users(id),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at         TIMESTAMPTZ NOT NULL,
+    consumed_at        TIMESTAMPTZ,
+    authz_completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_merge_records_pending
+    ON merge_records (consumed_at) WHERE authz_completed_at IS NULL;
+`,
+	},
 }
 
 // runMigrations applies pending schema migrations using the shared runner.

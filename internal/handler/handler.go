@@ -95,6 +95,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Unlink a provider: DELETE /auth/providers/{provider}
 	mux.HandleFunc("DELETE /auth/providers/{provider}", h.handleUnlinkProvider)
 
+	// Account merge: initiate merge OAuth flow and execute merge.
+	mux.HandleFunc("GET /auth/merge/{provider}", h.handleMergeInitiate)
+	mux.HandleFunc("POST /auth/merge", h.handleMerge)
+
 	// STS token exchange: POST /sts/token (optional).
 	if h.stsHandler != nil {
 		mux.Handle("POST /sts/token", h.stsHandler)
@@ -227,6 +231,11 @@ func (h *Handler) handleValidate(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.store.GetUserByID(r.Context(), sess.UserID)
 	if err != nil {
+		http.Error(w, "user not found", http.StatusUnauthorized)
+		return
+	}
+	user = h.followMerge(r, user)
+	if user == nil {
 		http.Error(w, "user not found", http.StatusUnauthorized)
 		return
 	}

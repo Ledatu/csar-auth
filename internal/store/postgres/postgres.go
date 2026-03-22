@@ -70,9 +70,9 @@ func (s *Store) Pool() *pgxpool.Pool {
 func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (*store.User, error) {
 	u := &store.User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
+		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at, merged_into, merged_at
 		 FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.MergedInto, &u.MergedAt)
 	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
@@ -85,9 +85,9 @@ func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (*store.User, err
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (*store.User, error) {
 	u := &store.User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
-		 FROM users WHERE lower(email) = lower($1)`, email,
-	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at, merged_into, merged_at
+		 FROM users WHERE lower(email) = lower($1) AND merged_into IS NULL`, email,
+	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.MergedInto, &u.MergedAt)
 	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
@@ -100,9 +100,9 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (*store.User, 
 func (s *Store) GetUserByPhone(ctx context.Context, phone string) (*store.User, error) {
 	u := &store.User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
-		 FROM users WHERE phone = $1`, phone,
-	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at, merged_into, merged_at
+		 FROM users WHERE phone = $1 AND merged_into IS NULL`, phone,
+	).Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.MergedInto, &u.MergedAt)
 	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
@@ -280,14 +280,14 @@ func (s *Store) FindOrCreateUser(ctx context.Context, acct *store.OAuthAccount, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Try to find an existing user by email.
+	// Try to find an existing user by email (skip merged accounts).
 	var unverifiedEmailConflict bool
 	if email != "" {
 		var user store.User
 		err = tx.QueryRow(ctx,
-			`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
-			 FROM users WHERE lower(email) = lower($1)`, email,
-		).Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
+			`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at, merged_into, merged_at
+			 FROM users WHERE lower(email) = lower($1) AND merged_into IS NULL`, email,
+		).Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt, &user.MergedInto, &user.MergedAt)
 
 		if err == nil {
 			if acct.EmailVerified {
@@ -306,13 +306,13 @@ func (s *Store) FindOrCreateUser(ctx context.Context, acct *store.OAuthAccount, 
 		}
 	}
 
-	// Try to find an existing user by phone.
+	// Try to find an existing user by phone (skip merged accounts).
 	if phone != "" {
 		var user store.User
 		err = tx.QueryRow(ctx,
-			`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at
-			 FROM users WHERE phone = $1`, phone,
-		).Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
+			`SELECT id, COALESCE(email, ''), COALESCE(phone, ''), display_name, avatar_url, created_at, updated_at, merged_into, merged_at
+			 FROM users WHERE phone = $1 AND merged_into IS NULL`, phone,
+		).Scan(&user.ID, &user.Email, &user.Phone, &user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt, &user.MergedInto, &user.MergedAt)
 
 		if err == nil {
 			if err := s.insertOAuthAccountTx(ctx, tx, acct, user.ID); err != nil {
@@ -417,4 +417,177 @@ func (s *Store) CountOAuthAccounts(ctx context.Context, userID uuid.UUID) (int, 
 		return 0, fmt.Errorf("counting oauth accounts: %w", err)
 	}
 	return count, nil
+}
+
+// --- Account Merge ---
+
+func (s *Store) CreateMergeRecord(ctx context.Context, rec *store.MergeRecord) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO merge_records (id, token_hash, source_user, target_user, created_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		rec.ID, rec.TokenHash, rec.SourceUser, rec.TargetUser, rec.CreatedAt, rec.ExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("creating merge record: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ConsumeMergeRecord(ctx context.Context, tokenHash string, targetUser uuid.UUID) (*store.MergeRecord, error) {
+	rec := &store.MergeRecord{}
+	err := s.pool.QueryRow(ctx,
+		`UPDATE merge_records
+		 SET consumed_at = now()
+		 WHERE token_hash = $1
+		   AND target_user = $2
+		   AND consumed_at IS NULL
+		   AND expires_at > now()
+		 RETURNING id, token_hash, source_user, target_user, created_at, expires_at, consumed_at, authz_completed_at`,
+		tokenHash, targetUser,
+	).Scan(&rec.ID, &rec.TokenHash, &rec.SourceUser, &rec.TargetUser, &rec.CreatedAt, &rec.ExpiresAt, &rec.ConsumedAt, &rec.AuthzCompletedAt)
+	if pgutil.IsNotFound(err) {
+		return nil, store.ErrMergeTokenExpired
+	}
+	if err != nil {
+		return nil, fmt.Errorf("consuming merge record: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) MergeUsers(ctx context.Context, targetID, sourceID uuid.UUID) error {
+	if targetID == sourceID {
+		return store.ErrSelfMerge
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning merge transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock both user rows in consistent order to prevent deadlocks.
+	lo, hi := targetID, sourceID
+	if lo.String() > hi.String() {
+		lo, hi = hi, lo
+	}
+	var loMergedInto, hiMergedInto *uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT merged_into FROM users WHERE id = $1 FOR UPDATE`, lo,
+	).Scan(&loMergedInto)
+	if err != nil {
+		return fmt.Errorf("locking user %s: %w", lo, err)
+	}
+	err = tx.QueryRow(ctx,
+		`SELECT merged_into FROM users WHERE id = $1 FOR UPDATE`, hi,
+	).Scan(&hiMergedInto)
+	if err != nil {
+		return fmt.Errorf("locking user %s: %w", hi, err)
+	}
+
+	// Check the source is not already merged.
+	sourceMergedInto := loMergedInto
+	if sourceID == hi {
+		sourceMergedInto = hiMergedInto
+	}
+	if sourceMergedInto != nil {
+		return store.ErrUserAlreadyMerged
+	}
+
+	// Move all OAuth accounts from source to target.
+	if _, err := tx.Exec(ctx,
+		`UPDATE oauth_accounts SET user_id = $1, updated_at = now() WHERE user_id = $2`,
+		targetID, sourceID,
+	); err != nil {
+		return fmt.Errorf("moving oauth accounts: %w", err)
+	}
+
+	// Revoke all source sessions.
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
+		sourceID,
+	); err != nil {
+		return fmt.Errorf("revoking source sessions: %w", err)
+	}
+
+	// Smart profile merge: read source values, then NULL them on source
+	// to release unique index slots, then copy into target gaps.
+	var srcEmail, srcPhone, srcDisplayName, srcAvatarURL *string
+	err = tx.QueryRow(ctx,
+		`SELECT email, phone, display_name, avatar_url FROM users WHERE id = $1`, sourceID,
+	).Scan(&srcEmail, &srcPhone, &srcDisplayName, &srcAvatarURL)
+	if err != nil {
+		return fmt.Errorf("reading source profile: %w", err)
+	}
+
+	// Clear unique fields on source first to avoid index conflicts.
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET email = NULL, phone = NULL WHERE id = $1`, sourceID,
+	); err != nil {
+		return fmt.Errorf("clearing source unique fields: %w", err)
+	}
+
+	// Now safely fill target gaps from the source values we captured.
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET
+		   email = CASE WHEN COALESCE(email, '') = '' THEN $2 ELSE email END,
+		   phone = CASE WHEN COALESCE(phone, '') = '' THEN $3 ELSE phone END,
+		   display_name = CASE WHEN display_name = '' AND $4 != '' THEN $4 ELSE display_name END,
+		   avatar_url = CASE WHEN avatar_url = '' AND $5 != '' THEN $5 ELSE avatar_url END,
+		   updated_at = now()
+		 WHERE id = $1`,
+		targetID, srcEmail, srcPhone, derefStr(srcDisplayName), derefStr(srcAvatarURL),
+	); err != nil {
+		return fmt.Errorf("merging profile: %w", err)
+	}
+
+	// Soft-delete source.
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET merged_into = $1, merged_at = now() WHERE id = $2`,
+		targetID, sourceID,
+	); err != nil {
+		return fmt.Errorf("soft-deleting source: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (s *Store) MarkMergeAuthzComplete(ctx context.Context, recordID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE merge_records SET authz_completed_at = now() WHERE id = $1`,
+		recordID,
+	)
+	if err != nil {
+		return fmt.Errorf("marking authz complete: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetPendingAuthzMerges(ctx context.Context) ([]store.MergeRecord, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, token_hash, source_user, target_user, created_at, expires_at, consumed_at, authz_completed_at
+		 FROM merge_records
+		 WHERE consumed_at IS NOT NULL AND authz_completed_at IS NULL
+		 ORDER BY consumed_at`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying pending authz merges: %w", err)
+	}
+	defer rows.Close()
+
+	var recs []store.MergeRecord
+	for rows.Next() {
+		var r store.MergeRecord
+		if err := rows.Scan(&r.ID, &r.TokenHash, &r.SourceUser, &r.TargetUser, &r.CreatedAt, &r.ExpiresAt, &r.ConsumedAt, &r.AuthzCompletedAt); err != nil {
+			return nil, fmt.Errorf("scanning merge record: %w", err)
+		}
+		recs = append(recs, r)
+	}
+	return recs, rows.Err()
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

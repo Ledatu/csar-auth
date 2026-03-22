@@ -20,6 +20,7 @@ type Store struct {
 	accounts        map[string]*store.OAuthAccount   // key: provider|provider_user_id
 	serviceAccounts map[string]*store.ServiceAccount // key: name
 	sessions        map[string]*store.Session        // key: session ID
+	mergeRecords    map[string]*store.MergeRecord    // key: token_hash
 }
 
 // New returns a new mock Store.
@@ -417,6 +418,122 @@ func (s *Store) ListUserSessions(_ context.Context, userID uuid.UUID) ([]store.S
 		}
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Account Merge methods
+// ---------------------------------------------------------------------------
+
+func (s *Store) CreateMergeRecord(_ context.Context, rec *store.MergeRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mergeRecords == nil {
+		s.mergeRecords = make(map[string]*store.MergeRecord)
+	}
+	cp := *rec
+	s.mergeRecords[rec.TokenHash] = &cp
+	return nil
+}
+
+func (s *Store) ConsumeMergeRecord(_ context.Context, tokenHash string, targetUser uuid.UUID) (*store.MergeRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.mergeRecords[tokenHash]
+	if !ok || rec.ConsumedAt != nil || time.Now().After(rec.ExpiresAt) || rec.TargetUser != targetUser {
+		return nil, store.ErrMergeTokenExpired
+	}
+	now := time.Now()
+	rec.ConsumedAt = &now
+	cp := *rec
+	return &cp, nil
+}
+
+func (s *Store) MergeUsers(_ context.Context, targetID, sourceID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if targetID == sourceID {
+		return store.ErrSelfMerge
+	}
+	source, ok := s.users[sourceID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if source.MergedInto != nil {
+		return store.ErrUserAlreadyMerged
+	}
+	target, ok := s.users[targetID]
+	if !ok {
+		return store.ErrNotFound
+	}
+
+	// Move oauth accounts.
+	for key, a := range s.accounts {
+		if a.UserID == sourceID {
+			a.UserID = targetID
+			s.accounts[key] = a
+		}
+	}
+
+	// Revoke source sessions.
+	now := time.Now()
+	for _, sess := range s.sessions {
+		if sess.UserID == sourceID && sess.RevokedAt == nil {
+			sess.RevokedAt = &now
+		}
+	}
+
+	// Smart profile merge: capture source values, clear unique fields on source,
+	// then fill target gaps — mirrors the Postgres path.
+	srcEmail, srcPhone := source.Email, source.Phone
+	srcDisplayName, srcAvatarURL := source.DisplayName, source.AvatarURL
+
+	source.Email = ""
+	source.Phone = ""
+
+	if target.Email == "" && srcEmail != "" {
+		target.Email = srcEmail
+	}
+	if target.Phone == "" && srcPhone != "" {
+		target.Phone = srcPhone
+	}
+	if target.DisplayName == "" && srcDisplayName != "" {
+		target.DisplayName = srcDisplayName
+	}
+	if target.AvatarURL == "" && srcAvatarURL != "" {
+		target.AvatarURL = srcAvatarURL
+	}
+	target.UpdatedAt = now
+
+	// Soft-delete source.
+	source.MergedInto = &targetID
+	source.MergedAt = &now
+
+	return nil
+}
+
+func (s *Store) MarkMergeAuthzComplete(_ context.Context, recordID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rec := range s.mergeRecords {
+		if rec.ID == recordID {
+			now := time.Now()
+			rec.AuthzCompletedAt = &now
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (s *Store) GetPendingAuthzMerges(_ context.Context) ([]store.MergeRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []store.MergeRecord
+	for _, rec := range s.mergeRecords {
+		if rec.ConsumedAt != nil && rec.AuthzCompletedAt == nil {
+			result = append(result, *rec)
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) Migrate(_ context.Context) error { return nil }

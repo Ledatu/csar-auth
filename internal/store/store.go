@@ -17,6 +17,9 @@ var (
 	ErrNotFound                = errors.New("not found")
 	ErrUnverifiedEmailConflict = errors.New("email matches existing user but provider email is not verified")
 	ErrProviderAlreadyLinked   = errors.New("provider account is already linked to another user")
+	ErrMergeTokenExpired       = errors.New("merge token expired or already consumed")
+	ErrUserAlreadyMerged       = errors.New("source user has already been merged")
+	ErrSelfMerge               = errors.New("cannot merge a user into itself")
 )
 
 // FindOrCreateResult indicates the outcome of FindOrCreateUser.
@@ -37,6 +40,20 @@ type User struct {
 	AvatarURL   string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	MergedInto  *uuid.UUID
+	MergedAt    *time.Time
+}
+
+// MergeRecord tracks a pending or completed account merge.
+type MergeRecord struct {
+	ID               uuid.UUID
+	TokenHash        string
+	SourceUser       uuid.UUID
+	TargetUser       uuid.UUID
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	ConsumedAt       *time.Time
+	AuthzCompletedAt *time.Time
 }
 
 // OAuthAccount links a provider identity to an internal user.
@@ -172,6 +189,27 @@ type Store interface {
 
 	// ListUserSessions returns all non-revoked, non-expired sessions for a user.
 	ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
+
+	// --- Account Merge ---
+
+	// CreateMergeRecord stores a new merge record with a hashed token.
+	CreateMergeRecord(ctx context.Context, rec *MergeRecord) error
+
+	// ConsumeMergeRecord atomically marks a merge record as consumed.
+	// Returns ErrMergeTokenExpired if the record is missing, expired, or already consumed.
+	// Validates that targetUser matches the record's target.
+	ConsumeMergeRecord(ctx context.Context, tokenHash string, targetUser uuid.UUID) (*MergeRecord, error)
+
+	// MergeUsers transfers all data from source to target in a single transaction:
+	// moves oauth_accounts, revokes source sessions, smart-merges profile, soft-deletes source.
+	// Returns ErrSelfMerge if source == target, ErrUserAlreadyMerged if source is already merged.
+	MergeUsers(ctx context.Context, targetID, sourceID uuid.UUID) error
+
+	// MarkMergeAuthzComplete sets authz_completed_at on a consumed merge record.
+	MarkMergeAuthzComplete(ctx context.Context, recordID uuid.UUID) error
+
+	// GetPendingAuthzMerges returns consumed merge records where authz has not yet completed.
+	GetPendingAuthzMerges(ctx context.Context) ([]MergeRecord, error)
 
 	// Migrate runs schema migrations (idempotent).
 	Migrate(ctx context.Context) error
