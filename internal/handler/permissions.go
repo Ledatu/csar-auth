@@ -6,20 +6,42 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
+	"time"
 
 	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-core/tlsx"
 	pb "github.com/ledatu/csar-proto/csar/authz/v1"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+const defaultRoleCacheTTL = 30 * time.Second
+
+// cachedRole holds pre-fetched role metadata (parents + permissions).
+type cachedRole struct {
+	Parents     []string
+	Permissions []permissionEntry
+}
+
+// roleSnapshot is an immutable point-in-time snapshot of all role definitions.
+type roleSnapshot struct {
+	roles   map[string]*cachedRole
+	builtAt time.Time
+}
 
 // AuthzClient wraps a gRPC connection to csar-authz.
 type AuthzClient struct {
 	conn   *grpc.ClientConn
 	client pb.AuthzServiceClient
 	logger *slog.Logger
+
+	snapshot atomic.Pointer[roleSnapshot]
+	sflight  singleflight.Group
+	cacheTTL time.Duration
 }
 
 // NewAuthzClient connects to csar-authz at the given endpoint.
@@ -52,15 +74,81 @@ func NewAuthzClient(endpoint string, tlsCfg config.AuthzTLSConfig, tokenSource c
 	}
 
 	return &AuthzClient{
-		conn:   conn,
-		client: pb.NewAuthzServiceClient(conn),
-		logger: logger,
+		conn:     conn,
+		client:   pb.NewAuthzServiceClient(conn),
+		logger:   logger,
+		cacheTTL: defaultRoleCacheTTL,
 	}, nil
 }
 
 // Close closes the gRPC connection.
 func (c *AuthzClient) Close() error {
 	return c.conn.Close()
+}
+
+// getSnapshot returns the current role snapshot, refreshing it if stale.
+// Concurrent callers share one in-flight refresh via singleflight.
+func (c *AuthzClient) getSnapshot(ctx context.Context) (*roleSnapshot, error) {
+	if snap := c.snapshot.Load(); snap != nil && time.Since(snap.builtAt) < c.cacheTTL {
+		return snap, nil
+	}
+
+	v, err, _ := c.sflight.Do("refresh", func() (interface{}, error) {
+		// Double-check: another goroutine may have refreshed while we waited.
+		if snap := c.snapshot.Load(); snap != nil && time.Since(snap.builtAt) < c.cacheTTL {
+			return snap, nil
+		}
+		return c.buildSnapshot(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*roleSnapshot), nil
+}
+
+// buildSnapshot fetches all roles and their permissions, building an immutable snapshot.
+func (c *AuthzClient) buildSnapshot(ctx context.Context) (*roleSnapshot, error) {
+	rolesResp, err := c.client.ListRoles(ctx, &pb.ListRolesRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("listing all roles: %w", err)
+	}
+
+	snap := &roleSnapshot{
+		roles:   make(map[string]*cachedRole, len(rolesResp.Roles)),
+		builtAt: time.Now(),
+	}
+
+	// Pre-populate parents from ListRoles (permissions filled below).
+	for _, r := range rolesResp.Roles {
+		snap.roles[r.Name] = &cachedRole{Parents: r.Parents}
+	}
+
+	// Fetch permissions for each role in parallel.
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(25)
+	for _, r := range rolesResp.Roles {
+		roleName := r.Name
+		g.Go(func() error {
+			permsResp, err := c.client.ListRolePermissions(gCtx, &pb.ListRolePermissionsRequest{Role: roleName})
+			if err != nil {
+				c.logger.Warn("cache: failed to list role permissions", "role", roleName, "error", err)
+				return nil
+			}
+			perms := make([]permissionEntry, len(permsResp.Permissions))
+			for i, p := range permsResp.Permissions {
+				perms[i] = permissionEntry{Action: p.Action, Resource: p.Resource}
+			}
+			snap.roles[roleName].Permissions = perms
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	c.snapshot.Store(snap)
+	c.logger.Info("role cache refreshed", "roles", len(snap.roles))
+	return snap, nil
 }
 
 // permissionEntry is a single permission in the REST response.
@@ -131,10 +219,18 @@ func (h *Handler) handlePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	snap, err := h.authzClient.getSnapshot(ctx)
+	if err != nil {
+		h.logger.Error("failed to load role cache", "error", err)
+		http.Error(w, "failed to fetch permissions", http.StatusBadGateway)
+		return
+	}
+
 	resp := permissionsResponse{Subject: subject}
 
 	if scopeType != "" {
-		sp, err := h.resolveScope(ctx, subject, scopeType, scopeID)
+		sp, err := h.resolveScope(ctx, snap, subject, scopeType, scopeID)
 		if err != nil {
 			h.logger.Error("failed to resolve scope", "subject", subject, "scope_type", scopeType, "scope_id", scopeID, "error", err)
 			http.Error(w, "failed to fetch permissions", http.StatusBadGateway)
@@ -150,23 +246,45 @@ func (h *Handler) handlePermissions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to fetch permissions", http.StatusBadGateway)
 			return
 		}
-		for _, sc := range scopesResp.Scopes {
-			sp, err := h.resolveScope(ctx, subject, sc.ScopeType, sc.ScopeId)
-			if err != nil {
-				h.logger.Warn("failed to resolve scope, skipping", "subject", subject, "scope_type", sc.ScopeType, "scope_id", sc.ScopeId, "error", err)
-				continue
+
+		type scopeResult struct {
+			scopeType, scopeID string
+			sp                 *scopedPermissions
+		}
+		results := make([]scopeResult, len(scopesResp.Scopes))
+
+		g, gCtx := errgroup.WithContext(ctx)
+		g.SetLimit(50)
+		for i, sc := range scopesResp.Scopes {
+			results[i].scopeType = sc.ScopeType
+			results[i].scopeID = sc.ScopeId
+			g.Go(func() error {
+				sp, err := h.resolveScope(gCtx, snap, subject, sc.ScopeType, sc.ScopeId)
+				if err != nil {
+					h.logger.Warn("failed to resolve scope, skipping", "subject", subject, "scope_type", sc.ScopeType, "scope_id", sc.ScopeId, "error", err)
+					return nil
+				}
+				results[i].sp = sp
+				return nil
+			})
+		}
+		_ = g.Wait()
+
+		for _, sr := range results {
+			if sr.sp != nil {
+				h.attachScope(&resp, sr.scopeType, sr.scopeID, sr.sp)
 			}
-			h.attachScope(&resp, sc.ScopeType, sc.ScopeId, sp)
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.Header().Set("Vary", "Authorization, Cookie")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// resolveScope fetches roles and permissions for a single (scopeType, scopeID) pair.
-func (h *Handler) resolveScope(ctx context.Context, subject, scopeType, scopeID string) (*scopedPermissions, error) {
+// resolveScope fetches the user's roles for one scope and resolves permissions from the cached snapshot.
+func (h *Handler) resolveScope(ctx context.Context, snap *roleSnapshot, subject, scopeType, scopeID string) (*scopedPermissions, error) {
 	rolesResp, err := h.authzClient.client.ListSubjectRoles(ctx, &pb.ListSubjectRolesRequest{
 		Subject:   subject,
 		ScopeType: scopeType,
@@ -176,28 +294,22 @@ func (h *Handler) resolveScope(ctx context.Context, subject, scopeType, scopeID 
 		return nil, fmt.Errorf("listing roles: %w", err)
 	}
 
-	effectiveRoles := h.collectEffectiveRoles(ctx, rolesResp.Roles)
+	effectiveRoles := collectEffectiveRoles(snap, rolesResp.Roles)
 
 	var permissions []permissionEntry
 	seen := make(map[string]struct{})
 	for _, roleName := range effectiveRoles {
-		permsResp, err := h.authzClient.client.ListRolePermissions(ctx, &pb.ListRolePermissionsRequest{
-			Role: roleName,
-		})
-		if err != nil {
-			h.logger.Warn("failed to list role permissions", "role", roleName, "error", err)
+		cr, ok := snap.roles[roleName]
+		if !ok {
 			continue
 		}
-		for _, p := range permsResp.Permissions {
+		for _, p := range cr.Permissions {
 			key := p.Action + ":" + p.Resource
 			if _, dup := seen[key]; dup {
 				continue
 			}
 			seen[key] = struct{}{}
-			permissions = append(permissions, permissionEntry{
-				Action:   p.Action,
-				Resource: p.Resource,
-			})
+			permissions = append(permissions, p)
 		}
 	}
 
@@ -265,6 +377,7 @@ func (h *Handler) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.Header().Set("Vary", "Authorization, Cookie")
 	_ = json.NewEncoder(w).Encode(checkResponse{
 		Allowed:      resp.Allowed,
 		MatchedRoles: resp.MatchedRoles,
@@ -281,8 +394,8 @@ func (h *Handler) extractSubject(r *http.Request) string {
 	return user.ID.String()
 }
 
-// collectEffectiveRoles resolves role hierarchy by walking parent roles.
-func (h *Handler) collectEffectiveRoles(ctx context.Context, directRoles []string) []string {
+// collectEffectiveRoles walks the parent hierarchy in-memory using the cached snapshot.
+func collectEffectiveRoles(snap *roleSnapshot, directRoles []string) []string {
 	seen := make(map[string]struct{})
 	var result []string
 
@@ -294,13 +407,11 @@ func (h *Handler) collectEffectiveRoles(ctx context.Context, directRoles []strin
 		seen[roleName] = struct{}{}
 		result = append(result, roleName)
 
-		// Resolve parents.
-		roleResp, err := h.authzClient.client.GetRole(ctx, &pb.GetRoleRequest{Name: roleName})
-		if err != nil {
-			h.logger.Warn("failed to get role for hierarchy resolution", "role", roleName, "error", err)
+		cr, ok := snap.roles[roleName]
+		if !ok {
 			return
 		}
-		for _, parent := range roleResp.Role.Parents {
+		for _, parent := range cr.Parents {
 			walk(parent)
 		}
 	}

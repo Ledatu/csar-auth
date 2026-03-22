@@ -28,6 +28,7 @@ type mockAuthzClient struct {
 	listSubjectRolesFn  func(ctx context.Context, req *pb.ListSubjectRolesRequest) (*pb.ListSubjectRolesResponse, error)
 	listSubjectScopesFn func(ctx context.Context, req *pb.ListSubjectScopesRequest) (*pb.ListSubjectScopesResponse, error)
 	listRolePermsFn     func(ctx context.Context, req *pb.ListRolePermissionsRequest) (*pb.ListRolePermissionsResponse, error)
+	listRolesFn         func(ctx context.Context, req *pb.ListRolesRequest) (*pb.ListRolesResponse, error)
 	getRoleFn           func(ctx context.Context, req *pb.GetRoleRequest) (*pb.GetRoleResponse, error)
 	checkAccessFn       func(ctx context.Context, req *pb.CheckAccessRequest) (*pb.CheckAccessResponse, error)
 }
@@ -42,6 +43,10 @@ func (m *mockAuthzClient) ListSubjectScopes(ctx context.Context, req *pb.ListSub
 
 func (m *mockAuthzClient) ListRolePermissions(ctx context.Context, req *pb.ListRolePermissionsRequest, _ ...grpc.CallOption) (*pb.ListRolePermissionsResponse, error) {
 	return m.listRolePermsFn(ctx, req)
+}
+
+func (m *mockAuthzClient) ListRoles(ctx context.Context, req *pb.ListRolesRequest, _ ...grpc.CallOption) (*pb.ListRolesResponse, error) {
+	return m.listRolesFn(ctx, req)
 }
 
 func (m *mockAuthzClient) GetRole(ctx context.Context, req *pb.GetRoleRequest, _ ...grpc.CallOption) (*pb.GetRoleResponse, error) {
@@ -135,7 +140,7 @@ func (th *testHarness) checkRequest(t *testing.T, token, queryString string) *ht
 //   - platform scope: role "platform_admin" with permission platform.roles.create:admin
 //   - tenant "t-123": role "tenant_manager" with permission tenant.members.read:admin
 //
-// All roles have no parents.
+// All roles have no parents (flat hierarchy for simplicity).
 func setupStandardMock(mock *mockAuthzClient) {
 	mock.listSubjectScopesFn = func(_ context.Context, _ *pb.ListSubjectScopesRequest) (*pb.ListSubjectScopesResponse, error) {
 		return &pb.ListSubjectScopesResponse{
@@ -155,6 +160,15 @@ func setupStandardMock(mock *mockAuthzClient) {
 		default:
 			return &pb.ListSubjectRolesResponse{}, nil
 		}
+	}
+
+	mock.listRolesFn = func(_ context.Context, _ *pb.ListRolesRequest) (*pb.ListRolesResponse, error) {
+		return &pb.ListRolesResponse{
+			Roles: []*pb.Role{
+				{Name: "platform_admin"},
+				{Name: "tenant_manager"},
+			},
+		}, nil
 	}
 
 	mock.getRoleFn = func(_ context.Context, req *pb.GetRoleRequest) (*pb.GetRoleResponse, error) {
@@ -321,6 +335,7 @@ func TestPermissions_Unauthenticated(t *testing.T) {
 
 func TestPermissions_NoAssignments(t *testing.T) {
 	th := newTestHarness(t)
+	setupStandardMock(th.mock)
 	th.mock.listSubjectScopesFn = func(_ context.Context, _ *pb.ListSubjectScopesRequest) (*pb.ListSubjectScopesResponse, error) {
 		return &pb.ListSubjectScopesResponse{}, nil
 	}
@@ -341,6 +356,67 @@ func TestPermissions_NoAssignments(t *testing.T) {
 	}
 	if resp.Tenants != nil {
 		t.Errorf("tenants should be nil, got %v", resp.Tenants)
+	}
+}
+
+func TestPermissions_RoleHierarchy(t *testing.T) {
+	th := newTestHarness(t)
+
+	th.mock.listRolesFn = func(_ context.Context, _ *pb.ListRolesRequest) (*pb.ListRolesResponse, error) {
+		return &pb.ListRolesResponse{
+			Roles: []*pb.Role{
+				{Name: "admin", Parents: []string{"editor"}},
+				{Name: "editor", Parents: []string{"viewer"}},
+				{Name: "viewer"},
+			},
+		}, nil
+	}
+	th.mock.listRolePermsFn = func(_ context.Context, req *pb.ListRolePermissionsRequest) (*pb.ListRolePermissionsResponse, error) {
+		switch req.Role {
+		case "admin":
+			return &pb.ListRolePermissionsResponse{Permissions: []*pb.Permission{
+				{Action: "admin.delete", Resource: "/**"},
+			}}, nil
+		case "editor":
+			return &pb.ListRolePermissionsResponse{Permissions: []*pb.Permission{
+				{Action: "POST", Resource: "/wb/**"},
+			}}, nil
+		case "viewer":
+			return &pb.ListRolePermissionsResponse{Permissions: []*pb.Permission{
+				{Action: "GET", Resource: "/wb/**"},
+			}}, nil
+		default:
+			return &pb.ListRolePermissionsResponse{}, nil
+		}
+	}
+	th.mock.listSubjectScopesFn = func(_ context.Context, _ *pb.ListSubjectScopesRequest) (*pb.ListSubjectScopesResponse, error) {
+		return &pb.ListSubjectScopesResponse{
+			Scopes: []*pb.SubjectScope{{ScopeType: "platform"}},
+		}, nil
+	}
+	th.mock.listSubjectRolesFn = func(_ context.Context, _ *pb.ListSubjectRolesRequest) (*pb.ListSubjectRolesResponse, error) {
+		return &pb.ListSubjectRolesResponse{Roles: []string{"admin"}}, nil
+	}
+
+	token := th.issueToken(t, testUserID)
+	w := th.permissionsRequest(t, token, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp permissionsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.Platform == nil {
+		t.Fatal("platform is nil")
+	}
+	if len(resp.Platform.Roles) != 3 {
+		t.Fatalf("expected 3 effective roles (admin->editor->viewer), got %v", resp.Platform.Roles)
+	}
+	if len(resp.Platform.Permissions) != 3 {
+		t.Errorf("expected 3 permissions, got %d: %v", len(resp.Platform.Permissions), resp.Platform.Permissions)
 	}
 }
 
