@@ -233,7 +233,8 @@ func TestMigrateTelegramID_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999")
+	meta := map[string]interface{}{"oidc_sub": "old-oidc-sub"}
+	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999", meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,13 +248,16 @@ func TestMigrateTelegramID_Success(t *testing.T) {
 		t.Fatalf("expected old key to be gone, got %v", err)
 	}
 
-	// New key should exist and point to the same user.
+	// New key should exist with metadata.
 	got, err := s.GetOAuthAccount(context.Background(), "telegram", "99999999999999")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.UserID != user.ID {
 		t.Fatalf("expected user_id %s, got %s", user.ID, got.UserID)
+	}
+	if got.ProviderMetadata["oidc_sub"] != "old-oidc-sub" {
+		t.Fatalf("expected metadata oidc_sub, got %v", got.ProviderMetadata)
 	}
 }
 
@@ -280,7 +284,8 @@ func TestMigrateTelegramID_CleanupSameUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999")
+	meta := map[string]interface{}{"oidc_sub": "the-oidc-sub"}
+	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999", meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,13 +299,16 @@ func TestMigrateTelegramID_CleanupSameUser(t *testing.T) {
 		t.Fatalf("expected old key to be deleted, got %v", err)
 	}
 
-	// OIDC key should still exist.
+	// Surviving key should have metadata.
 	got, err := s.GetOAuthAccount(context.Background(), "telegram", "99999999999999")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.UserID != user.ID {
 		t.Fatalf("expected user_id %s, got %s", user.ID, got.UserID)
+	}
+	if got.ProviderMetadata["oidc_sub"] != "the-oidc-sub" {
+		t.Fatalf("expected metadata on surviving row, got %v", got.ProviderMetadata)
 	}
 }
 
@@ -329,7 +337,7 @@ func TestMigrateTelegramID_DifferentUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999")
+	migrated, err := s.MigrateTelegramID(context.Background(), "123456", "99999999999999", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +359,7 @@ func TestMigrateTelegramID_DifferentUsers(t *testing.T) {
 func TestMigrateTelegramID_NothingToMigrate(t *testing.T) {
 	s := mock.New()
 
-	migrated, err := s.MigrateTelegramID(context.Background(), "nonexistent", "99999999999999")
+	migrated, err := s.MigrateTelegramID(context.Background(), "nonexistent", "99999999999999", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

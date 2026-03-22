@@ -130,6 +130,10 @@ CREATE INDEX IF NOT EXISTS idx_merge_records_pending
     ON merge_records (consumed_at) WHERE authz_completed_at IS NULL;
 `,
 	},
+	{
+		Name: "009_provider_metadata",
+		Up:   `ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS provider_metadata JSONB;`,
+	},
 }
 
 // runMigrations applies pending schema migrations using the shared runner.

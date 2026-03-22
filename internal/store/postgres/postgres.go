@@ -3,6 +3,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -157,11 +158,13 @@ func (s *Store) GetOAuthAccount(ctx context.Context, provider, providerUserID st
 	a := &store.OAuthAccount{}
 	err := s.pool.QueryRow(ctx,
 		`SELECT provider, provider_user_id, user_id, email, display_name, avatar_url,
-		        access_token, refresh_token, expires_at, email_verified, linked_at, updated_at
+		        access_token, refresh_token, expires_at, email_verified, linked_at, updated_at,
+		        provider_metadata
 		 FROM oauth_accounts WHERE provider = $1 AND provider_user_id = $2`,
 		provider, providerUserID,
 	).Scan(&a.Provider, &a.ProviderUserID, &a.UserID, &a.Email, &a.DisplayName, &a.AvatarURL,
-		&a.AccessToken, &a.RefreshToken, &a.ExpiresAt, &a.EmailVerified, &a.LinkedAt, &a.UpdatedAt)
+		&a.AccessToken, &a.RefreshToken, &a.ExpiresAt, &a.EmailVerified, &a.LinkedAt, &a.UpdatedAt,
+		&a.ProviderMetadata)
 	if pgutil.IsNotFound(err) {
 		return nil, store.ErrNotFound
 	}
@@ -174,7 +177,8 @@ func (s *Store) GetOAuthAccount(ctx context.Context, provider, providerUserID st
 func (s *Store) GetOAuthAccountsByUserID(ctx context.Context, userID uuid.UUID) ([]store.OAuthAccount, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT provider, provider_user_id, user_id, email, display_name, avatar_url,
-		        access_token, refresh_token, expires_at, email_verified, linked_at, updated_at
+		        access_token, refresh_token, expires_at, email_verified, linked_at, updated_at,
+		        provider_metadata
 		 FROM oauth_accounts WHERE user_id = $1 ORDER BY linked_at`, userID,
 	)
 	if err != nil {
@@ -186,7 +190,8 @@ func (s *Store) GetOAuthAccountsByUserID(ctx context.Context, userID uuid.UUID) 
 	for rows.Next() {
 		var a store.OAuthAccount
 		if err := rows.Scan(&a.Provider, &a.ProviderUserID, &a.UserID, &a.Email, &a.DisplayName, &a.AvatarURL,
-			&a.AccessToken, &a.RefreshToken, &a.ExpiresAt, &a.EmailVerified, &a.LinkedAt, &a.UpdatedAt); err != nil {
+			&a.AccessToken, &a.RefreshToken, &a.ExpiresAt, &a.EmailVerified, &a.LinkedAt, &a.UpdatedAt,
+			&a.ProviderMetadata); err != nil {
 			return nil, fmt.Errorf("scanning oauth account: %w", err)
 		}
 		accounts = append(accounts, a)
@@ -202,10 +207,12 @@ func (s *Store) CreateOAuthAccount(ctx context.Context, acct *store.OAuthAccount
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO oauth_accounts
 		 (provider, provider_user_id, user_id, email, display_name, avatar_url,
-		  access_token, refresh_token, expires_at, email_verified, linked_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		  access_token, refresh_token, expires_at, email_verified, linked_at, updated_at,
+		  provider_metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		acct.Provider, acct.ProviderUserID, acct.UserID, acct.Email, acct.DisplayName, acct.AvatarURL,
 		acct.AccessToken, acct.RefreshToken, acct.ExpiresAt, acct.EmailVerified, acct.LinkedAt, acct.UpdatedAt,
+		metadataJSON(acct.ProviderMetadata),
 	)
 	if err != nil {
 		return fmt.Errorf("create oauth account: %w", err)
@@ -219,12 +226,14 @@ func (s *Store) UpdateOAuthAccount(ctx context.Context, acct *store.OAuthAccount
 		`UPDATE oauth_accounts
 		 SET email = $3, display_name = $4, avatar_url = $5,
 		     access_token = $6, refresh_token = $7, expires_at = $8,
-		     email_verified = $9, updated_at = $10
+		     email_verified = $9, updated_at = $10,
+		     provider_metadata = COALESCE($11, provider_metadata)
 		 WHERE provider = $1 AND provider_user_id = $2`,
 		acct.Provider, acct.ProviderUserID,
 		acct.Email, acct.DisplayName, acct.AvatarURL,
 		acct.AccessToken, acct.RefreshToken, acct.ExpiresAt,
 		acct.EmailVerified, acct.UpdatedAt,
+		metadataJSON(acct.ProviderMetadata),
 	)
 	if err != nil {
 		return fmt.Errorf("update oauth account: %w", err)
@@ -379,10 +388,12 @@ func (s *Store) insertOAuthAccountTx(ctx context.Context, tx pgx.Tx, acct *store
 	_, err := tx.Exec(ctx,
 		`INSERT INTO oauth_accounts
 		 (provider, provider_user_id, user_id, email, display_name, avatar_url,
-		  access_token, refresh_token, expires_at, email_verified, linked_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		  access_token, refresh_token, expires_at, email_verified, linked_at, updated_at,
+		  provider_metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		acct.Provider, acct.ProviderUserID, userID, acct.Email, acct.DisplayName, acct.AvatarURL,
 		acct.AccessToken, acct.RefreshToken, acct.ExpiresAt, acct.EmailVerified, now, now,
+		metadataJSON(acct.ProviderMetadata),
 	)
 	if err != nil {
 		return fmt.Errorf("linking oauth account: %w", err)
@@ -431,32 +442,44 @@ func (s *Store) CountOAuthAccounts(ctx context.Context, userID uuid.UUID) (int, 
 
 // --- Telegram ID migration ---
 
-func (s *Store) MigrateTelegramID(ctx context.Context, botAPIID, oidcSub string) (bool, error) {
+func (s *Store) MigrateTelegramID(ctx context.Context, oldID, newID string, metadata map[string]interface{}) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin telegram ID migration tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Check whether the OIDC sub already exists.
+	// Check whether newID already exists.
 	var existingUserID *uuid.UUID
 	err = tx.QueryRow(ctx,
 		`SELECT user_id FROM oauth_accounts
 		 WHERE provider = 'telegram' AND provider_user_id = $1`,
-		oidcSub,
+		newID,
 	).Scan(&existingUserID)
-	oidcExists := err == nil
+	newExists := err == nil
 
-	if oidcExists {
-		// The OIDC sub is already linked. Delete the stale bot API entry
+	metaBytes := metadataJSON(metadata)
+
+	if newExists {
+		// newID is already linked. Delete the stale oldID entry
 		// only if it points to the same user (avoid cross-user damage).
 		tag, err := tx.Exec(ctx,
 			`DELETE FROM oauth_accounts
 			 WHERE provider = 'telegram' AND provider_user_id = $1 AND user_id = $2`,
-			botAPIID, existingUserID,
+			oldID, existingUserID,
 		)
 		if err != nil {
-			return false, fmt.Errorf("deleting stale bot API entry: %w", err)
+			return false, fmt.Errorf("deleting stale entry: %w", err)
+		}
+		// Also update metadata on the surviving row.
+		if metaBytes != nil {
+			if _, err := tx.Exec(ctx,
+				`UPDATE oauth_accounts SET provider_metadata = $2, updated_at = now()
+				 WHERE provider = 'telegram' AND provider_user_id = $1`,
+				newID, metaBytes,
+			); err != nil {
+				return false, fmt.Errorf("updating metadata on surviving row: %w", err)
+			}
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return false, fmt.Errorf("committing stale cleanup: %w", err)
@@ -464,12 +487,12 @@ func (s *Store) MigrateTelegramID(ctx context.Context, botAPIID, oidcSub string)
 		return tag.RowsAffected() > 0, nil
 	}
 
-	// OIDC sub does not exist yet -- rename the bot API entry.
+	// newID does not exist yet -- rename oldID entry.
 	tag, err := tx.Exec(ctx,
 		`UPDATE oauth_accounts
-		 SET provider_user_id = $2, updated_at = now()
+		 SET provider_user_id = $2, provider_metadata = COALESCE($3, provider_metadata), updated_at = now()
 		 WHERE provider = 'telegram' AND provider_user_id = $1`,
-		botAPIID, oidcSub,
+		oldID, newID, metaBytes,
 	)
 	if err != nil {
 		return false, fmt.Errorf("migrating telegram ID: %w", err)
@@ -644,6 +667,15 @@ func (s *Store) GetPendingAuthzMerges(ctx context.Context) ([]store.MergeRecord,
 		recs = append(recs, r)
 	}
 	return recs, rows.Err()
+}
+
+// metadataJSON returns a []byte for JSONB insertion, or nil if the map is empty.
+func metadataJSON(m map[string]interface{}) []byte {
+	if len(m) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(m)
+	return b
 }
 
 func derefStr(s *string) string {

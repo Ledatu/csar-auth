@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -96,14 +97,25 @@ func CallbackHandler(
 		phone := extractPhone(gothUser.RawData)
 
 		if gothUser.Provider == "telegram" {
-			if botID := extractTelegramBotID(gothUser.RawData); botID != "" && botID != gothUser.UserID {
-				migrated, err := st.MigrateTelegramID(r.Context(), botID, gothUser.UserID)
+			botID := extractTelegramBotID(gothUser.RawData)
+			logger.Info("telegram ID resolution check",
+				"oidc_sub", gothUser.UserID,
+				"bot_id", botID,
+				"raw_data_keys", rawDataKeys(gothUser.RawData))
+			if botID != "" && botID != gothUser.UserID {
+				oidcSub := gothUser.UserID
+				tgMeta := map[string]interface{}{"oidc_sub": oidcSub}
+
+				acct.ProviderUserID = botID
+				acct.ProviderMetadata = tgMeta
+
+				migrated, err := st.MigrateTelegramID(r.Context(), oidcSub, botID, tgMeta)
 				if err != nil {
 					logger.Warn("telegram ID migration failed",
-						"bot_id", botID, "oidc_sub", gothUser.UserID, "error", err)
+						"oidc_sub", oidcSub, "bot_id", botID, "error", err)
 				} else if migrated {
-					logger.Info("migrated telegram provider_user_id",
-						"bot_id", botID, "oidc_sub", gothUser.UserID)
+					logger.Info("migrated telegram provider_user_id to bot API ID",
+						"from_oidc_sub", oidcSub, "to_bot_id", botID)
 				}
 			}
 		}
@@ -408,6 +420,15 @@ func extractPhone(raw map[string]interface{}) string {
 	}
 
 	return ""
+}
+
+func rawDataKeys(raw map[string]interface{}) []string {
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // extractTelegramBotID extracts the numeric Telegram Bot API user ID from the

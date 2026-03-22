@@ -540,12 +540,12 @@ func (s *Store) GetPendingAuthzMerges(_ context.Context) ([]store.MergeRecord, e
 	return result, nil
 }
 
-func (s *Store) MigrateTelegramID(_ context.Context, botAPIID, oidcSub string) (bool, error) {
+func (s *Store) MigrateTelegramID(_ context.Context, oldID, newID string, metadata map[string]interface{}) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	oldKey := oauthKey("telegram", botAPIID)
-	newKey := oauthKey("telegram", oidcSub)
+	oldKey := oauthKey("telegram", oldID)
+	newKey := oauthKey("telegram", newID)
 
 	oldAcct, oldExists := s.accounts[oldKey]
 	newAcct, newExists := s.accounts[newKey]
@@ -555,19 +555,23 @@ func (s *Store) MigrateTelegramID(_ context.Context, botAPIID, oidcSub string) (
 	}
 
 	if newExists {
-		// OIDC sub already linked -- delete the stale bot API entry
-		// only if both point to the same user.
 		if oldAcct.UserID == newAcct.UserID {
 			delete(s.accounts, oldKey)
+			if len(metadata) > 0 {
+				newAcct.ProviderMetadata = metadata
+				newAcct.UpdatedAt = time.Now()
+			}
 			return true, nil
 		}
 		return false, nil
 	}
 
-	// Rename bot API entry to OIDC sub.
 	delete(s.accounts, oldKey)
-	oldAcct.ProviderUserID = oidcSub
+	oldAcct.ProviderUserID = newID
 	oldAcct.UpdatedAt = time.Now()
+	if len(metadata) > 0 {
+		oldAcct.ProviderMetadata = metadata
+	}
 	cp := *oldAcct
 	s.accounts[newKey] = &cp
 	return true, nil

@@ -58,18 +58,19 @@ type MergeRecord struct {
 
 // OAuthAccount links a provider identity to an internal user.
 type OAuthAccount struct {
-	Provider       string
-	ProviderUserID string
-	UserID         uuid.UUID
-	Email          string
-	DisplayName    string
-	AvatarURL      string
-	AccessToken    string
-	RefreshToken   string
-	ExpiresAt      *time.Time
-	EmailVerified  bool
-	LinkedAt       time.Time
-	UpdatedAt      time.Time
+	Provider         string
+	ProviderUserID   string
+	UserID           uuid.UUID
+	Email            string
+	DisplayName      string
+	AvatarURL        string
+	AccessToken      string
+	RefreshToken     string
+	ExpiresAt        *time.Time
+	EmailVerified    bool
+	LinkedAt         time.Time
+	UpdatedAt        time.Time
+	ProviderMetadata map[string]interface{} // provider-specific data (e.g. Telegram OIDC sub)
 }
 
 // Session represents a server-side session backed by the sessions table.
@@ -211,11 +212,12 @@ type Store interface {
 	// GetPendingAuthzMerges returns consumed merge records where authz has not yet completed.
 	GetPendingAuthzMerges(ctx context.Context) ([]MergeRecord, error)
 
-	// MigrateTelegramID atomically updates a Telegram oauth_account's
-	// provider_user_id from a Bot API ID to an OIDC sub.
-	// Returns true if a row was updated, false if the old ID was not found
-	// or the new ID already exists.
-	MigrateTelegramID(ctx context.Context, botAPIID, oidcSub string) (bool, error)
+	// MigrateTelegramID atomically migrates a Telegram oauth_account's
+	// provider_user_id from oldID to newID, storing metadata on the surviving row.
+	// If newID already exists for the same user, oldID is deleted (stale cleanup).
+	// If newID exists for a different user, no change is made.
+	// Returns true if a row was updated or cleaned up.
+	MigrateTelegramID(ctx context.Context, oldID, newID string, metadata map[string]interface{}) (bool, error)
 
 	// Migrate runs schema migrations (idempotent).
 	Migrate(ctx context.Context) error

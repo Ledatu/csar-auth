@@ -146,10 +146,12 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type linkedAccount struct {
-		Provider      string `json:"provider"`
-		DisplayName   string `json:"display_name,omitempty"`
-		Email         string `json:"email,omitempty"`
-		EmailVerified bool   `json:"email_verified"`
+		Provider       string                 `json:"provider"`
+		ProviderUserID string                 `json:"provider_user_id,omitempty"`
+		DisplayName    string                 `json:"display_name,omitempty"`
+		Email          string                 `json:"email,omitempty"`
+		EmailVerified  bool                   `json:"email_verified"`
+		Metadata       map[string]interface{} `json:"metadata,omitempty"`
 	}
 
 	type meResponse struct {
@@ -170,10 +172,12 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, a := range accounts {
 		resp.Accounts = append(resp.Accounts, linkedAccount{
-			Provider:      a.Provider,
-			DisplayName:   a.DisplayName,
-			Email:         a.Email,
-			EmailVerified: a.EmailVerified,
+			Provider:       a.Provider,
+			ProviderUserID: a.ProviderUserID,
+			DisplayName:    a.DisplayName,
+			Email:          a.Email,
+			EmailVerified:  a.EmailVerified,
+			Metadata:       a.ProviderMetadata,
 		})
 	}
 
