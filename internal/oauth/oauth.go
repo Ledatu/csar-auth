@@ -15,6 +15,8 @@ import (
 	"github.com/markbates/goth/providers/github"
 	"github.com/markbates/goth/providers/google"
 	oidc "github.com/markbates/goth/providers/openidConnect"
+	"github.com/markbates/goth/providers/vk"
+	"github.com/markbates/goth/providers/yandex"
 
 	"github.com/ledatu/csar-core/httpx"
 
@@ -186,6 +188,20 @@ func createProvider(cfg config.ProviderConfig, callbackURL string) (goth.Provide
 		// NewNamed formats the name as "telegram-oidc"; override to match our URL routing.
 		p.SetName("telegram")
 		return p, nil
+
+	case "vk":
+		scopes := cfg.Scopes
+		if len(scopes) == 0 {
+			scopes = []string{"email", "phone"}
+		}
+		return vk.New(cfg.ClientID, cfg.ClientSecret, callbackURL, scopes...), nil
+
+	case "yandex":
+		scopes := cfg.Scopes
+		if len(scopes) == 0 {
+			scopes = []string{"login:email", "login:info", "login:avatar", "login:phone"}
+		}
+		return yandex.New(cfg.ClientID, cfg.ClientSecret, callbackURL, scopes...), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", cfg.Name)
