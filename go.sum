@@ -88,6 +88,8 @@ github.com/ledatu/csar-core v0.1.8 h1:x3jpZ7QenB2HT/6xEeoZZF5Eqt4/iZExl3cLlSkOG2
 github.com/ledatu/csar-core v0.1.8/go.mod h1:lP3hrt7uLU6PWKn8M4LzN7K9on7GUwRnSzOjTVmru6w=
 github.com/ledatu/csar-proto v0.1.1 h1:Ihu+UqKWzA/ndxsu614F2AuaSE1LAWIU/pvD0+vAaF8=
 github.com/ledatu/csar-proto v0.1.1/go.mod h1:HlqVobOX4ChofAQrwRsiyq62VKTNAuRsNGmZQwHJl7I=
+github.com/ledatu/csar-proto v0.1.2 h1:mUcy4PWUbCTeekhLoDW1LqVxda3ZeHqau10DpvnsydM=
+github.com/ledatu/csar-proto v0.1.2/go.mod h1:HlqVobOX4ChofAQrwRsiyq62VKTNAuRsNGmZQwHJl7I=
 github.com/markbates/goth v1.80.0 h1:NnvatczZDzOs1hn9Ug+dVYf2Viwwkp/ZDX5K+GLjan8=
 github.com/markbates/goth v1.80.0/go.mod h1:4/GYHo+W6NWisrMPZnq0Yr2Q70UntNLn7KXEFhrIdAY=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=

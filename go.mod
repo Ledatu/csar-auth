@@ -8,7 +8,7 @@ require (
 	github.com/gorilla/sessions v1.4.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/ledatu/csar-core v0.1.8
-	github.com/ledatu/csar-proto v0.1.1
+	github.com/ledatu/csar-proto v0.1.2
 	github.com/markbates/goth v1.80.0
 	github.com/redis/go-redis/v9 v9.18.0
 	go.opentelemetry.io/otel v1.42.0
