@@ -446,6 +446,8 @@ func extractTelegramBotID(raw map[string]interface{}) string {
 		return strconv.FormatInt(int64(id), 10)
 	case json.Number:
 		return id.String()
+	case string:
+		return id
 	}
 	return ""
 }
