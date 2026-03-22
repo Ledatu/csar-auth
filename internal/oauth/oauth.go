@@ -199,7 +199,7 @@ func createProvider(cfg config.ProviderConfig, callbackURL string) (goth.Provide
 	case "yandex":
 		scopes := cfg.Scopes
 		if len(scopes) == 0 {
-			scopes = []string{"login:email", "login:info", "login:avatar", "login:phone"}
+			scopes = []string{"login:email", "login:info", "login:avatar", "login:default_phone"}
 		}
 		return yandex.New(cfg.ClientID, cfg.ClientSecret, callbackURL, scopes...), nil
 
