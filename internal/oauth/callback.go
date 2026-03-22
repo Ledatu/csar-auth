@@ -70,12 +70,7 @@ func CallbackHandler(
 			acct.ExpiresAt = &t
 		}
 
-		var phone string
-		if pn, ok := gothUser.RawData["phone_number"]; ok {
-			if s, ok := pn.(string); ok {
-				phone = s
-			}
-		}
+		phone := extractPhone(gothUser.RawData)
 
 		if intent == "link" {
 			handleLinkCallback(w, r, st, sessMgr, oauthMgr, cookieName, acct, phone, provider, logger)
@@ -213,4 +208,30 @@ func handleLinkCallback(
 	logger.Info("provider linked to user", "user_id", userID, "provider", provider)
 	redirectURL := httpx.AppendQuery(frontendURL, "linked", provider)
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
+// extractPhone tries to pull a phone number from provider-specific RawData.
+// Supports:
+//   - OIDC "phone_number" (Telegram)
+//   - Yandex "default_phone": {"number": "+7..."}
+func extractPhone(raw map[string]interface{}) string {
+	// OIDC standard claim (Telegram, Google, etc.)
+	if pn, ok := raw["phone_number"]; ok {
+		if s, ok := pn.(string); ok && s != "" {
+			return s
+		}
+	}
+
+	// Yandex: default_phone is an object with a "number" field
+	if dp, ok := raw["default_phone"]; ok {
+		if m, ok := dp.(map[string]interface{}); ok {
+			if n, ok := m["number"]; ok {
+				if s, ok := n.(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+	}
+
+	return ""
 }
