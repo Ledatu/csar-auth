@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -101,7 +102,8 @@ func CallbackHandler(
 			logger.Info("telegram ID resolution check",
 				"oidc_sub", gothUser.UserID,
 				"bot_id", botID,
-				"raw_data_keys", rawDataKeys(gothUser.RawData))
+				"raw_id_type", fmt.Sprintf("%T", gothUser.RawData["id"]),
+				"raw_id_value", fmt.Sprintf("%v", gothUser.RawData["id"]))
 			if botID != "" && botID != gothUser.UserID {
 				oidcSub := gothUser.UserID
 				tgMeta := map[string]interface{}{"oidc_sub": oidcSub}
