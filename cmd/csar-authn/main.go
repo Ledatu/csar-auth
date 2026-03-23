@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/ledatu/csar-core/audit"
+	"github.com/ledatu/csar-core/authzclient"
 	"github.com/ledatu/csar-core/configload"
 	"github.com/ledatu/csar-core/configsource"
 	"github.com/ledatu/csar-core/gatewayctx"
@@ -168,7 +169,14 @@ func run(
 	var authzClient *handler.AuthzClient
 	if cfg.Authz.Enabled {
 		tokenSrc := handler.NewServiceTokenSource(sessionMgr, "svc:csar-authn", []string{cfg.JWT.Audience}, 5*time.Minute)
-		authzClient, err = handler.NewAuthzClient(cfg.Authz.Endpoint, cfg.Authz.TLS, tokenSrc, logger.With("component", "authz-client"))
+		authzClient, err = handler.NewAuthzClient(&authzclient.Config{
+			Address:     cfg.Authz.Endpoint,
+			Insecure:    !cfg.Authz.TLS.Enabled,
+			CAFile:      cfg.Authz.TLS.CAFile,
+			CertFile:    cfg.Authz.TLS.CertFile,
+			KeyFile:     cfg.Authz.TLS.KeyFile,
+			TokenSource: tokenSrc,
+		}, logger.With("component", "authz-client"))
 		if err != nil {
 			return fmt.Errorf("connecting to authz service: %w", err)
 		}

@@ -9,14 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ledatu/csar-authn/internal/config"
-	"github.com/ledatu/csar-core/tlsx"
+	"github.com/ledatu/csar-core/authzclient"
 	pb "github.com/ledatu/csar-proto/csar/authz/v1"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const defaultRoleCacheTTL = 30 * time.Second
@@ -44,38 +41,16 @@ type AuthzClient struct {
 	cacheTTL time.Duration
 }
 
-// NewAuthzClient connects to csar-authz at the given endpoint.
-// When tlsCfg.Enabled is true it establishes a TLS (optionally mTLS) connection;
-// otherwise plaintext gRPC is used. If tokenSource is non-nil, every RPC
-// automatically carries a Bearer token via the authorization metadata header.
-func NewAuthzClient(endpoint string, tlsCfg config.AuthzTLSConfig, tokenSource credentials.PerRPCCredentials, logger *slog.Logger) (*AuthzClient, error) {
-	var opts []grpc.DialOption
-	if !tlsCfg.Enabled {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	} else {
-		tc, err := tlsx.NewClientTLSConfig(tlsx.ClientConfig{
-			CAFile:   tlsCfg.CAFile,
-			CertFile: tlsCfg.CertFile,
-			KeyFile:  tlsCfg.KeyFile,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("building authz TLS config: %w", err)
-		}
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
-	}
-
-	if tokenSource != nil {
-		opts = append(opts, grpc.WithPerRPCCredentials(tokenSource))
-	}
-
-	conn, err := grpc.NewClient(endpoint, opts...)
+// NewAuthzClient connects to csar-authz using the shared authzclient.Dial helper.
+func NewAuthzClient(cfg *authzclient.Config, logger *slog.Logger) (*AuthzClient, error) {
+	conn, client, err := authzclient.Dial(cfg, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	return &AuthzClient{
 		conn:     conn,
-		client:   pb.NewAuthzServiceClient(conn),
+		client:   client,
 		logger:   logger,
 		cacheTTL: defaultRoleCacheTTL,
 	}, nil
