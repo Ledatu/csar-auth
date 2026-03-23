@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ledatu/csar-core/audit"
+	"github.com/ledatu/csar-core/gatewayctx"
 	"github.com/ledatu/csar-core/httpx"
 
 	"github.com/ledatu/csar-authn/internal/config"
@@ -219,7 +220,7 @@ func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleValidate is a lightweight session check for router subrequests.
-// Returns 200 with X-User-ID / X-User-Email headers, or 401.
+// Returns 200 with X-User-ID, X-User-Email, and X-Gateway-Subject headers, or 401.
 // Does NOT set cookies (response goes to the router, not the browser).
 func (h *Handler) handleValidate(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfg.Load()
@@ -248,5 +249,6 @@ func (h *Handler) handleValidate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-User-ID", user.ID.String())
 	w.Header().Set("X-User-Email", user.Email)
+	w.Header().Set(gatewayctx.HeaderSubject, user.ID.String())
 	w.WriteHeader(http.StatusOK)
 }
