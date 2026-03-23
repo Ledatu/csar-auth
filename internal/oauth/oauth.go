@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -26,13 +27,14 @@ import (
 // Manager manages OAuth providers and the Goth session store.
 // Fields guarded by mu may be swapped at runtime via Reload.
 type Manager struct {
-	mu               sync.RWMutex
-	logger           *slog.Logger
-	baseURL          string
-	frontendURL      string
-	cookieSecure     bool
-	cookieSameSite   http.SameSite
-	trustedProviders map[string]bool
+	mu                     sync.RWMutex
+	logger                 *slog.Logger
+	baseURL                string
+	frontendURL            string
+	allowedRedirectOrigins map[string]bool
+	cookieSecure           bool
+	cookieSameSite         http.SameSite
+	trustedProviders       map[string]bool
 }
 
 // NewManager initializes Goth providers from config and returns a Manager.
@@ -42,12 +44,13 @@ func NewManager(cfg *config.Config, logger *slog.Logger) (*Manager, error) {
 	}
 
 	return &Manager{
-		logger:           logger,
-		baseURL:          cfg.BaseURL,
-		frontendURL:      cfg.FrontendURL,
-		cookieSecure:     cfg.Cookie.Secure,
-		cookieSameSite:   httpx.ParseSameSite(cfg.Cookie.SameSite),
-		trustedProviders: buildTrustedMap(cfg),
+		logger:                 logger,
+		baseURL:                cfg.BaseURL,
+		frontendURL:            cfg.FrontendURL,
+		allowedRedirectOrigins: buildAllowedOrigins(cfg.AllowedRedirectOrigins),
+		cookieSecure:           cfg.Cookie.Secure,
+		cookieSameSite:         httpx.ParseSameSite(cfg.Cookie.SameSite),
+		trustedProviders:       buildTrustedMap(cfg),
 	}, nil
 }
 
@@ -60,9 +63,12 @@ func (m *Manager) Reload(cfg *config.Config) error {
 
 	trusted := buildTrustedMap(cfg)
 
+	allowed := buildAllowedOrigins(cfg.AllowedRedirectOrigins)
+
 	m.mu.Lock()
 	m.trustedProviders = trusted
 	m.frontendURL = cfg.FrontendURL
+	m.allowedRedirectOrigins = allowed
 	m.baseURL = cfg.BaseURL
 	m.cookieSecure = cfg.Cookie.Secure
 	m.cookieSameSite = httpx.ParseSameSite(cfg.Cookie.SameSite)
@@ -108,6 +114,31 @@ func buildTrustedMap(cfg *config.Config) map[string]bool {
 	return trusted
 }
 
+func buildAllowedOrigins(origins []string) map[string]bool {
+	m := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		u, err := url.Parse(o)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		m[strings.ToLower(u.Scheme+"://"+u.Host)] = true
+	}
+	return m
+}
+
+// ValidateRedirectURL checks that rawURL is a valid absolute URL whose origin
+// (scheme + host) appears in the configured allowlist.
+func (m *Manager) ValidateRedirectURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	origin := strings.ToLower(u.Scheme + "://" + u.Host)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.allowedRedirectOrigins[origin]
+}
+
 // FrontendURL returns the configured frontend redirect target.
 func (m *Manager) FrontendURL() string {
 	m.mu.RLock()
@@ -140,17 +171,31 @@ func (m *Manager) BeginAuthHandler() http.Handler {
 		r.URL.RawQuery = q.Encode()
 
 		intent := r.URL.Query().Get("intent")
+		redirectURL := r.URL.Query().Get("redirect_url")
 
-		m.logger.Info("oauth initiation", "provider", provider, "intent", intent)
+		m.logger.Info("oauth initiation", "provider", provider, "intent", intent, "redirect_url", redirectURL)
+
+		m.mu.RLock()
+		secure := m.cookieSecure
+		sameSite := m.cookieSameSite
+		m.mu.RUnlock()
 
 		if intent == "link" {
-			m.mu.RLock()
-			secure := m.cookieSecure
-			sameSite := m.cookieSameSite
-			m.mu.RUnlock()
 			http.SetCookie(w, &http.Cookie{
 				Name:     "csar_intent",
 				Value:    "link",
+				Path:     "/",
+				MaxAge:   300,
+				HttpOnly: true,
+				Secure:   secure,
+				SameSite: sameSite,
+			})
+		}
+
+		if redirectURL != "" && m.ValidateRedirectURL(redirectURL) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "csar_redirect",
+				Value:    redirectURL,
 				Path:     "/",
 				MaxAge:   300,
 				HttpOnly: true,

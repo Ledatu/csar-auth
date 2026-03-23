@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -21,6 +20,30 @@ import (
 	"github.com/ledatu/csar-authn/internal/session"
 	"github.com/ledatu/csar-authn/internal/store"
 )
+
+// resolveRedirectURL reads the csar_redirect cookie, clears it, validates the
+// URL against the Manager's allowlist, and returns it. Falls back to
+// oauthMgr.FrontendURL() if the cookie is missing or the value is invalid.
+func resolveRedirectURL(r *http.Request, w http.ResponseWriter, oauthMgr *Manager, cookieSecure bool, cookieSameSite http.SameSite) string {
+	if c, err := r.Cookie("csar_redirect"); err == nil {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "csar_redirect",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   cookieSecure,
+			SameSite: cookieSameSite,
+		})
+		if oauthMgr.ValidateRedirectURL(c.Value) {
+			return c.Value
+		}
+	}
+	if u := oauthMgr.FrontendURL(); u != "" {
+		return u
+	}
+	return "/"
+}
 
 // CallbackHandler returns an http.Handler that completes the OAuth flow.
 // It handles two intents:
@@ -123,7 +146,7 @@ func CallbackHandler(
 		}
 
 		if intent == "link" {
-			handleLinkCallback(w, r, st, sessMgr, oauthMgr, cookieName, acct, phone, provider, logger)
+			handleLinkCallback(w, r, st, sessMgr, oauthMgr, cookieName, cookieSecure, cookieSameSite, acct, phone, provider, logger)
 			return
 		}
 
@@ -149,10 +172,7 @@ func handleLoginCallback(
 	email, phone, displayName, avatarURL, provider string,
 	logger *slog.Logger,
 ) {
-	frontendURL := oauthMgr.FrontendURL()
-	if frontendURL == "" {
-		frontendURL = "/"
-	}
+	frontendURL := resolveRedirectURL(r, w, oauthMgr, cookieSecure, cookieSameSite)
 
 	user, result, err := st.FindOrCreateUser(r.Context(), acct, email, phone, displayName, avatarURL)
 	if err != nil {
@@ -208,14 +228,13 @@ func handleLinkCallback(
 	sessMgr *session.SessionManager,
 	oauthMgr *Manager,
 	cookieName string,
+	cookieSecure bool,
+	cookieSameSite http.SameSite,
 	acct *store.OAuthAccount,
 	phone, provider string,
 	logger *slog.Logger,
 ) {
-	frontendURL := oauthMgr.FrontendURL()
-	if frontendURL == "" {
-		frontendURL = "/"
-	}
+	frontendURL := resolveRedirectURL(r, w, oauthMgr, cookieSecure, cookieSameSite)
 
 	cookie, err := r.Cookie(cookieName)
 	if err != nil {
@@ -281,10 +300,7 @@ func handleMergeCallback(
 	provider string,
 	logger *slog.Logger,
 ) {
-	frontendURL := oauthMgr.FrontendURL()
-	if frontendURL == "" {
-		frontendURL = "/"
-	}
+	frontendURL := resolveRedirectURL(r, w, oauthMgr, cookieSecure, cookieSameSite)
 
 	// Read merge_target from dedicated cookie (replaces Goth session).
 	var mergeTarget string
@@ -422,15 +438,6 @@ func extractPhone(raw map[string]interface{}) string {
 	}
 
 	return ""
-}
-
-func rawDataKeys(raw map[string]interface{}) []string {
-	keys := make([]string, 0, len(raw))
-	for k := range raw {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // extractTelegramBotID extracts the numeric Telegram Bot API user ID from the
