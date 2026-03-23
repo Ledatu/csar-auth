@@ -11,6 +11,7 @@ import (
 	"github.com/ledatu/csar-core/gatewayctx"
 	"github.com/ledatu/csar-core/httpx"
 
+	"github.com/ledatu/csar-authn/internal/botverify"
 	"github.com/ledatu/csar-authn/internal/config"
 	"github.com/ledatu/csar-authn/internal/oauth"
 	"github.com/ledatu/csar-authn/internal/session"
@@ -105,6 +106,15 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// STS token exchange: POST /sts/token (optional).
 	if h.stsHandler != nil {
 		mux.Handle("POST /sts/token", h.stsHandler)
+	}
+
+	// Bot verification endpoints (optional).
+	if cfg.BotVerify != nil && cfg.BotVerify.Enabled {
+		bv := botverify.NewHandler(h.store, h.sessMgr, h.oauthMgr, cfg, h.logger)
+		mux.HandleFunc("POST /auth/bot-verify/start", bv.HandleStart)
+		mux.HandleFunc("GET /auth/bot-verify/status/{id}", bv.HandleStatus)
+		mux.HandleFunc("POST /auth/bot-verify/finalize/{id}", bv.HandleFinalize)
+		mux.HandleFunc("POST /svc/authn/bot-verify/confirm", bv.HandleConfirm)
 	}
 
 	// Permissions endpoints (optional, requires authz service).

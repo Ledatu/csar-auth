@@ -15,12 +15,13 @@ import (
 
 // Store is a thread-safe in-memory implementation of store.Store.
 type Store struct {
-	mu              sync.Mutex
-	users           map[uuid.UUID]*store.User
-	accounts        map[string]*store.OAuthAccount   // key: provider|provider_user_id
-	serviceAccounts map[string]*store.ServiceAccount // key: name
-	sessions        map[string]*store.Session        // key: session ID
-	mergeRecords    map[string]*store.MergeRecord    // key: token_hash
+	mu               sync.Mutex
+	users            map[uuid.UUID]*store.User
+	accounts         map[string]*store.OAuthAccount   // key: provider|provider_user_id
+	serviceAccounts  map[string]*store.ServiceAccount // key: name
+	sessions         map[string]*store.Session        // key: session ID
+	mergeRecords     map[string]*store.MergeRecord    // key: token_hash
+	botVerifications map[uuid.UUID]*store.BotVerification
 }
 
 // New returns a new mock Store.
@@ -538,6 +539,90 @@ func (s *Store) GetPendingAuthzMerges(_ context.Context) ([]store.MergeRecord, e
 		}
 	}
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Bot Verification methods
+// ---------------------------------------------------------------------------
+
+func (s *Store) CreateBotVerification(_ context.Context, v *store.BotVerification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.botVerifications == nil {
+		s.botVerifications = make(map[uuid.UUID]*store.BotVerification)
+	}
+	cp := *v
+	s.botVerifications[v.ID] = &cp
+	return nil
+}
+
+func (s *Store) GetBotVerification(_ context.Context, id uuid.UUID) (*store.BotVerification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.botVerifications[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *v
+	return &cp, nil
+}
+
+func (s *Store) ConfirmBotVerification(_ context.Context, codeHash, provider, providerUserID, displayName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, v := range s.botVerifications {
+		if v.CodeHash == codeHash && v.Status == "pending" && now.Before(v.ExpiresAt) {
+			v.Status = "confirmed"
+			v.Provider = provider
+			v.ProviderUserID = providerUserID
+			v.ProviderDisplay = displayName
+			v.ConfirmedAt = &now
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (s *Store) ConsumeBotVerification(_ context.Context, id uuid.UUID) (*store.BotVerification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.botVerifications[id]
+	if !ok || v.Status != "confirmed" || time.Now().After(v.ExpiresAt) {
+		return nil, store.ErrNotFound
+	}
+	now := time.Now()
+	v.Status = "consumed"
+	v.ConsumedAt = &now
+	cp := *v
+	return &cp, nil
+}
+
+func (s *Store) CleanExpiredBotVerifications(_ context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var n int64
+	for _, v := range s.botVerifications {
+		if (v.Status == "pending" || v.Status == "confirmed") && now.After(v.ExpiresAt) {
+			v.Status = "expired"
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *Store) CountPendingBotVerifications(_ context.Context, ipAddress string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, v := range s.botVerifications {
+		if v.IPAddress == ipAddress && v.Status == "pending" && now.Before(v.ExpiresAt) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *Store) MigrateTelegramID(_ context.Context, oldID, newID string, metadata map[string]interface{}) (bool, error) {

@@ -440,6 +440,106 @@ func (s *Store) CountOAuthAccounts(ctx context.Context, userID uuid.UUID) (int, 
 	return count, nil
 }
 
+// --- Bot Verification ---
+
+func (s *Store) CreateBotVerification(ctx context.Context, v *store.BotVerification) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO bot_verifications
+		 (id, code_hash, intent, user_id, status, created_at, expires_at, user_agent, ip_address)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		v.ID, v.CodeHash, v.Intent, v.UserID, v.Status, v.CreatedAt, v.ExpiresAt, v.UserAgent, v.IPAddress,
+	)
+	if err != nil {
+		return fmt.Errorf("creating bot verification: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetBotVerification(ctx context.Context, id uuid.UUID) (*store.BotVerification, error) {
+	v := &store.BotVerification{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, code_hash, intent, user_id, provider, provider_user_id, provider_display,
+		        status, created_at, expires_at, confirmed_at, consumed_at, user_agent, ip_address
+		 FROM bot_verifications WHERE id = $1`, id,
+	).Scan(&v.ID, &v.CodeHash, &v.Intent, &v.UserID, &v.Provider, &v.ProviderUserID, &v.ProviderDisplay,
+		&v.Status, &v.CreatedAt, &v.ExpiresAt, &v.ConfirmedAt, &v.ConsumedAt, &v.UserAgent, &v.IPAddress)
+	if pgutil.IsNotFound(err) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get bot verification: %w", err)
+	}
+	return v, nil
+}
+
+func (s *Store) ConfirmBotVerification(ctx context.Context, codeHash, provider, providerUserID, displayName string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE bot_verifications
+		 SET status = 'confirmed',
+		     provider = $2,
+		     provider_user_id = $3,
+		     provider_display = $4,
+		     confirmed_at = now()
+		 WHERE code_hash = $1
+		   AND status = 'pending'
+		   AND expires_at > now()`,
+		codeHash, provider, providerUserID, displayName,
+	)
+	if err != nil {
+		return fmt.Errorf("confirming bot verification: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ConsumeBotVerification(ctx context.Context, id uuid.UUID) (*store.BotVerification, error) {
+	v := &store.BotVerification{}
+	err := s.pool.QueryRow(ctx,
+		`UPDATE bot_verifications
+		 SET status = 'consumed', consumed_at = now()
+		 WHERE id = $1 AND status = 'confirmed' AND expires_at > now()
+		 RETURNING id, code_hash, intent, user_id, provider, provider_user_id, provider_display,
+		           status, created_at, expires_at, confirmed_at, consumed_at, user_agent, ip_address`,
+		id,
+	).Scan(&v.ID, &v.CodeHash, &v.Intent, &v.UserID, &v.Provider, &v.ProviderUserID, &v.ProviderDisplay,
+		&v.Status, &v.CreatedAt, &v.ExpiresAt, &v.ConfirmedAt, &v.ConsumedAt, &v.UserAgent, &v.IPAddress)
+	if pgutil.IsNotFound(err) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("consuming bot verification: %w", err)
+	}
+	return v, nil
+}
+
+func (s *Store) CleanExpiredBotVerifications(ctx context.Context) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE bot_verifications
+		 SET status = 'expired'
+		 WHERE status IN ('pending', 'confirmed')
+		   AND expires_at <= now()`,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("cleaning expired bot verifications: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Store) CountPendingBotVerifications(ctx context.Context, ipAddress string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM bot_verifications
+		 WHERE ip_address = $1 AND status = 'pending' AND expires_at > now()`,
+		ipAddress,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting pending bot verifications: %w", err)
+	}
+	return count, nil
+}
+
 // --- Telegram ID migration ---
 
 func (s *Store) MigrateTelegramID(ctx context.Context, oldID, newID string, metadata map[string]interface{}) (bool, error) {

@@ -233,6 +233,27 @@ func run(
 		}
 	}()
 
+	// --- Bot verification cleanup ---
+	if cfg.BotVerify != nil && cfg.BotVerify.Enabled {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					n, err := st.CleanExpiredBotVerifications(ctx)
+					if err != nil {
+						logger.Error("bot verification cleanup failed", "error", err)
+					} else if n > 0 {
+						logger.Info("bot verification cleanup", "expired", n)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	// --- Merge authz reconciler ---
 	go h.RunMergeAuthzReconciler(ctx, 60*time.Second)
 

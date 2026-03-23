@@ -134,6 +134,31 @@ CREATE INDEX IF NOT EXISTS idx_merge_records_pending
 		Name: "009_provider_metadata",
 		Up:   `ALTER TABLE oauth_accounts ADD COLUMN IF NOT EXISTS provider_metadata JSONB;`,
 	},
+	{
+		Name: "010_bot_verifications",
+		Up: `
+CREATE TABLE IF NOT EXISTS bot_verifications (
+    id               UUID PRIMARY KEY,
+    code_hash        VARCHAR(64) NOT NULL,
+    intent           VARCHAR(20) NOT NULL,
+    user_id          UUID REFERENCES users(id),
+    provider         VARCHAR(50),
+    provider_user_id VARCHAR(255),
+    provider_display VARCHAR(255),
+    status           VARCHAR(20) NOT NULL DEFAULT 'pending',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at       TIMESTAMPTZ NOT NULL,
+    confirmed_at     TIMESTAMPTZ,
+    consumed_at      TIMESTAMPTZ,
+    user_agent       TEXT,
+    ip_address       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bot_verifications_code_hash
+    ON bot_verifications (code_hash) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_bot_verifications_expires
+    ON bot_verifications (expires_at) WHERE status IN ('pending', 'confirmed');
+`,
+	},
 }
 
 // runMigrations applies pending schema migrations using the shared runner.

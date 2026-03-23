@@ -73,6 +73,24 @@ type OAuthAccount struct {
 	ProviderMetadata map[string]interface{} // provider-specific data (e.g. Telegram OIDC sub)
 }
 
+// BotVerification tracks a pending bot-based identity verification.
+type BotVerification struct {
+	ID              uuid.UUID
+	CodeHash        string
+	Intent          string     // "login" or "link"
+	UserID          *uuid.UUID // non-nil when intent=link
+	Provider        string
+	ProviderUserID  string
+	ProviderDisplay string
+	Status          string // pending, confirmed, consumed, expired
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	ConfirmedAt     *time.Time
+	ConsumedAt      *time.Time
+	UserAgent       string
+	IPAddress       string
+}
+
 // Session represents a server-side session backed by the sessions table.
 type Session struct {
 	ID         string
@@ -211,6 +229,32 @@ type Store interface {
 
 	// GetPendingAuthzMerges returns consumed merge records where authz has not yet completed.
 	GetPendingAuthzMerges(ctx context.Context) ([]MergeRecord, error)
+
+	// --- Bot Verification ---
+
+	// CreateBotVerification inserts a new pending bot verification record.
+	CreateBotVerification(ctx context.Context, v *BotVerification) error
+
+	// GetBotVerification returns a bot verification by ID.
+	// Returns ErrNotFound if the record does not exist.
+	GetBotVerification(ctx context.Context, id uuid.UUID) (*BotVerification, error)
+
+	// ConfirmBotVerification atomically confirms a pending, non-expired verification
+	// matched by code_hash. Fills provider identity fields and sets status to confirmed.
+	// Returns ErrNotFound if no matching pending record exists.
+	ConfirmBotVerification(ctx context.Context, codeHash, provider, providerUserID, displayName string) error
+
+	// ConsumeBotVerification atomically transitions a confirmed verification to consumed.
+	// Returns the full record for session/link creation.
+	// Returns ErrNotFound if the record is not in confirmed state.
+	ConsumeBotVerification(ctx context.Context, id uuid.UUID) (*BotVerification, error)
+
+	// CleanExpiredBotVerifications marks pending/confirmed rows past expires_at as expired.
+	// Returns the number of rows updated.
+	CleanExpiredBotVerifications(ctx context.Context) (int64, error)
+
+	// CountPendingBotVerifications counts active pending verifications by IP address.
+	CountPendingBotVerifications(ctx context.Context, ipAddress string) (int, error)
 
 	// MigrateTelegramID atomically migrates a Telegram oauth_account's
 	// provider_user_id from oldID to newID, storing metadata on the surviving row.
