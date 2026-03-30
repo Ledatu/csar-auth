@@ -203,10 +203,13 @@ func run(
 	// Health and readiness endpoints.
 	mux.Handle("GET /health", health.Handler(Version))
 	rc := health.NewReadinessChecker(Version, true)
+	rc.Register("http_server", health.TCPDialCheck(cfg.ListenAddr, time.Second))
 	if pgStore, ok := st.(*postgres.Store); ok {
 		pool := pgStore.Pool()
 		rc.Register("postgres", func() health.CheckStatus {
-			if err := pool.Ping(context.Background()); err != nil {
+			checkCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := pool.Ping(checkCtx); err != nil {
 				return health.CheckStatus{Status: "fail", Detail: err.Error()}
 			}
 			return health.CheckStatus{Status: "ok"}
@@ -307,27 +310,24 @@ func run(
 	}
 
 	// --- Metrics sidecar ---
+	var metricsSidecar *health.Sidecar
 	if metricsAddr != "" {
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", observe.MetricsHandler(reg))
-		metricsMux.Handle("/health", health.Handler(Version))
-		metricsMux.Handle("/readiness", rc.Handler())
-
-		metricsSrv, err := httpserver.New(&httpserver.Config{
-			Addr:         metricsAddr,
-			Handler:      metricsMux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-		}, logger.With("component", "metrics"))
+		metricsSidecar, err = health.NewSidecar(health.SidecarConfig{
+			Addr:      metricsAddr,
+			Version:   Version,
+			Readiness: rc,
+			Metrics:   observe.MetricsHandler(reg),
+			Logger:    logger.With("component", "metrics"),
+		})
 		if err != nil {
-			return fmt.Errorf("creating metrics server: %w", err)
+			return fmt.Errorf("creating metrics sidecar: %w", err)
 		}
 		go func() {
-			if err := metricsSrv.ListenAndServe(); err != nil {
-				logger.Error("metrics server error", "error", err)
+			if err := metricsSidecar.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("metrics sidecar error", "error", err)
 			}
 		}()
-		logger.Info("metrics server started", "addr", metricsAddr)
+		logger.Info("metrics sidecar started", "addr", metricsAddr)
 	}
 
 	// --- Main HTTP server ---
@@ -350,7 +350,15 @@ func run(
 		return fmt.Errorf("creating server: %w", err)
 	}
 
-	return srv.Run(ctx)
+	runErr := srv.Run(ctx)
+	if metricsSidecar != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := metricsSidecar.Shutdown(shutdownCtx); err != nil {
+			logger.Error("metrics sidecar shutdown error", "error", err)
+		}
+	}
+	return runErr
 }
 
 func initSTS(
