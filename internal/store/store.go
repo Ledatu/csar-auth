@@ -103,6 +103,20 @@ type Session struct {
 	RevokedAt  *time.Time
 }
 
+// AdminSessionListParams configures pagination and filters for platform-admin session listing.
+type AdminSessionListParams struct {
+	UserID     *uuid.UUID
+	Limit      int
+	Offset     int
+	ActiveOnly bool
+}
+
+// AdminSessionRow is a session joined with the owning user's email.
+type AdminSessionRow struct {
+	Session
+	UserEmail string
+}
+
 // ServiceAccount represents an STS service account stored in the database.
 type ServiceAccount struct {
 	Name              string
@@ -208,6 +222,11 @@ type Store interface {
 
 	// ListUserSessions returns all non-revoked, non-expired sessions for a user.
 	ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
+
+	// ListAdminSessions returns sessions for platform administration dashboards.
+	// UserID, when non-nil, restricts results to that user. ActiveOnly, when true,
+	// includes only rows that are not revoked and not expired.
+	ListAdminSessions(ctx context.Context, params AdminSessionListParams) ([]AdminSessionRow, error)
 
 	// --- Account Merge ---
 

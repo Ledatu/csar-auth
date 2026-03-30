@@ -4,6 +4,7 @@ package mock
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -423,6 +424,40 @@ func (s *Store) ListUserSessions(_ context.Context, userID uuid.UUID) ([]store.S
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) ListAdminSessions(_ context.Context, params store.AdminSessionListParams) ([]store.AdminSessionRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var rows []store.AdminSessionRow
+	for _, sess := range s.sessions {
+		if params.UserID != nil && sess.UserID != *params.UserID {
+			continue
+		}
+		if params.ActiveOnly && (sess.RevokedAt != nil || !now.Before(sess.ExpiresAt)) {
+			continue
+		}
+		u, ok := s.users[sess.UserID]
+		email := ""
+		if ok {
+			email = u.Email
+		}
+		cp := *sess
+		rows = append(rows, store.AdminSessionRow{Session: cp, UserEmail: email})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].LastSeenAt.After(rows[j].LastSeenAt)
+	})
+	start := params.Offset
+	if start > len(rows) {
+		return nil, nil
+	}
+	end := start + params.Limit
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[start:end], nil
 }
 
 // ---------------------------------------------------------------------------

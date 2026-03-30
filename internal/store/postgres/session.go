@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,4 +103,45 @@ func (s *Store) ListUserSessions(ctx context.Context, userID uuid.UUID) ([]store
 		sessions = append(sessions, sess)
 	}
 	return sessions, rows.Err()
+}
+
+func (s *Store) ListAdminSessions(ctx context.Context, params store.AdminSessionListParams) ([]store.AdminSessionRow, error) {
+	var b strings.Builder
+	args := make([]interface{}, 0, 4)
+	n := 1
+	b.WriteString(`
+SELECT s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at, s.user_agent, s.ip_address, s.revoked_at,
+       COALESCE(u.email, '') AS user_email
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+WHERE 1=1`)
+	if params.UserID != nil {
+		fmt.Fprintf(&b, " AND s.user_id = $%d", n)
+		args = append(args, *params.UserID)
+		n++
+	}
+	if params.ActiveOnly {
+		b.WriteString(" AND s.revoked_at IS NULL AND s.expires_at > now()")
+	}
+	fmt.Fprintf(&b, " ORDER BY s.last_seen_at DESC LIMIT $%d OFFSET $%d", n, n+1)
+	args = append(args, params.Limit, params.Offset)
+
+	rows, err := s.pool.Query(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list admin sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.AdminSessionRow
+	for rows.Next() {
+		var row store.AdminSessionRow
+		if err := rows.Scan(
+			&row.ID, &row.UserID, &row.CreatedAt, &row.LastSeenAt, &row.ExpiresAt,
+			&row.UserAgent, &row.IPAddress, &row.RevokedAt, &row.UserEmail,
+		); err != nil {
+			return nil, fmt.Errorf("scanning admin session: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }

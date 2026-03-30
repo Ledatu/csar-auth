@@ -88,6 +88,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Current user info: GET /auth/me
 	mux.HandleFunc("GET /auth/me", h.handleMe)
 
+	// Current user's active sessions: GET /auth/me/sessions
+	mux.HandleFunc("GET /auth/me/sessions", h.handleMeSessions)
+
 	// Session validation for router subrequests: GET /auth/validate
 	mux.HandleFunc("GET /auth/validate", h.handleValidate)
 
@@ -128,6 +131,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /admin/service-accounts/{name}", h.handleGetServiceAccount)
 		mux.HandleFunc("DELETE /admin/service-accounts/{name}", h.handleRevokeServiceAccount)
 		mux.HandleFunc("POST /admin/service-accounts/{name}/rotate", h.handleRotateServiceAccount)
+
+		mux.HandleFunc("GET /admin/sessions", h.handleListAdminSessions)
 	}
 }
 
