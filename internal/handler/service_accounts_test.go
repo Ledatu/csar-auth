@@ -40,24 +40,20 @@ func testPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 }
 
-// mockAuditStore records audit events in memory.
-type mockAuditStore struct {
+// mockAuditRecorder records audit events in memory.
+type mockAuditRecorder struct {
 	mu     sync.Mutex
 	events []audit.Event
 }
 
-func (m *mockAuditStore) Record(_ context.Context, event *audit.Event) error {
+func (m *mockAuditRecorder) Record(_ context.Context, event *audit.Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = append(m.events, *event)
 	return nil
 }
 
-func (m *mockAuditStore) List(_ context.Context, _ *audit.ListFilter) (*audit.ListResult, error) {
-	return &audit.ListResult{}, nil
-}
-
-func (m *mockAuditStore) Events() []audit.Event {
+func (m *mockAuditRecorder) Events() []audit.Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cp := make([]audit.Event, len(m.events))
@@ -66,11 +62,11 @@ func (m *mockAuditStore) Events() []audit.Event {
 }
 
 type saTestHarness struct {
-	handler    *Handler
-	sessionMgr *session.Manager
-	mock       *mockAuthzClient
-	store      *mock.Store
-	auditStore *mockAuditStore
+	handler       *Handler
+	sessionMgr    *session.Manager
+	mock          *mockAuthzClient
+	store         *mock.Store
+	auditRecorder *mockAuditRecorder
 }
 
 func newSATestHarness(t *testing.T) *saTestHarness {
@@ -94,25 +90,25 @@ func newSATestHarness(t *testing.T) *saTestHarness {
 		},
 	}
 	st := mock.New()
-	auditSt := &mockAuditStore{}
+	auditSt := &mockAuditRecorder{}
 
 	h := &Handler{
-		store:       st,
-		sessionMgr:  sm,
-		authzClient: &AuthzClient{client: authzMock, logger: slog.Default()},
-		auditStore:  auditSt,
-		logger:      slog.Default(),
+		store:         st,
+		sessionMgr:    sm,
+		authzClient:   &AuthzClient{client: authzMock, logger: slog.Default()},
+		auditRecorder: auditSt,
+		logger:        slog.Default(),
 	}
 	h.cfg.Store(&config.Config{
 		Cookie: config.CookieConfig{Name: "session"},
 	})
 
 	return &saTestHarness{
-		handler:    h,
-		sessionMgr: sm,
-		mock:       authzMock,
-		store:      st,
-		auditStore: auditSt,
+		handler:       h,
+		sessionMgr:    sm,
+		mock:          authzMock,
+		store:         st,
+		auditRecorder: auditSt,
 	}
 }
 
@@ -352,7 +348,7 @@ func TestSA_AuditRecorded(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", w.Code)
 	}
 
-	events := th.auditStore.Events()
+	events := th.auditRecorder.Events()
 	if len(events) != 1 {
 		t.Fatalf("expected 1 audit event, got %d", len(events))
 	}

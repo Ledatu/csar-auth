@@ -112,9 +112,9 @@ func (h *Handler) handleMerge(w http.ResponseWriter, r *http.Request) {
 	)
 
 	// Audit the merge event.
-	if h.auditStore != nil {
+	if h.auditRecorder != nil {
 		meta := json.RawMessage(fmt.Sprintf(`{"source_user":%q,"target_user":%q}`, sourceID, targetID))
-		_ = h.auditStore.Record(r.Context(), &audit.Event{
+		_ = h.auditRecorder.Record(r.Context(), &audit.Event{
 			Actor:      targetID.String(),
 			Action:     "user.merged",
 			TargetType: "user",

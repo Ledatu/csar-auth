@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/sessions v1.4.0
 	github.com/jackc/pgx/v5 v5.8.0
-	github.com/ledatu/csar-core v0.1.18
+	github.com/ledatu/csar-core v0.1.20
 	github.com/ledatu/csar-proto v0.1.3
 	github.com/markbates/goth v1.80.0
 	github.com/redis/go-redis/v9 v9.18.0

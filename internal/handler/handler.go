@@ -23,29 +23,29 @@ import (
 // cfg is stored behind an atomic pointer so config changes are visible to
 // request handlers without restarting the service.
 type Handler struct {
-	store       store.Store
-	sessionMgr  *session.Manager
-	sessMgr     *session.SessionManager
-	oauthMgr    *oauth.Manager
-	stsHandler  *sts.Handler // nil when STS is not configured
-	authzClient *AuthzClient // nil when authz is not configured
-	auditStore  audit.Store  // nil when audit is not configured
-	logger      *slog.Logger
-	cfg         atomic.Pointer[config.Config]
+	store         store.Store
+	sessionMgr    *session.Manager
+	sessMgr       *session.SessionManager
+	oauthMgr      *oauth.Manager
+	stsHandler    *sts.Handler   // nil when STS is not configured
+	authzClient   *AuthzClient   // nil when authz is not configured
+	auditRecorder audit.Recorder // nil when audit is not configured
+	logger        *slog.Logger
+	cfg           atomic.Pointer[config.Config]
 }
 
 // New creates a Handler with all dependencies.
-// stsHandler, authzClient, and auditStore may be nil when their features are not enabled.
-func New(st store.Store, sessionMgr *session.Manager, sessMgr *session.SessionManager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, auditStore audit.Store, logger *slog.Logger, cfg *config.Config) *Handler {
+// stsHandler, authzClient, and auditRecorder may be nil when their features are not enabled.
+func New(st store.Store, sessionMgr *session.Manager, sessMgr *session.SessionManager, oauthMgr *oauth.Manager, stsHandler *sts.Handler, authzClient *AuthzClient, auditRecorder audit.Recorder, logger *slog.Logger, cfg *config.Config) *Handler {
 	h := &Handler{
-		store:       st,
-		sessionMgr:  sessionMgr,
-		sessMgr:     sessMgr,
-		oauthMgr:    oauthMgr,
-		stsHandler:  stsHandler,
-		authzClient: authzClient,
-		auditStore:  auditStore,
-		logger:      logger,
+		store:         st,
+		sessionMgr:    sessionMgr,
+		sessMgr:       sessMgr,
+		oauthMgr:      oauthMgr,
+		stsHandler:    stsHandler,
+		authzClient:   authzClient,
+		auditRecorder: auditRecorder,
+		logger:        logger,
 	}
 	h.cfg.Store(cfg)
 	return h
@@ -229,6 +229,11 @@ func (h *Handler) handleUnlinkProvider(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	afterJSON, _ := json.Marshal(map[string]any{
+		"provider": provider,
+	})
+	h.recordAudit(r, user.ID.String(), "oauth_provider.unlink", "oauth_provider", provider, afterJSON)
 
 	h.logger.Info("provider unlinked", "user_id", user.ID, "provider", provider)
 	w.WriteHeader(http.StatusNoContent)

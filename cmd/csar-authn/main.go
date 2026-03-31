@@ -184,20 +184,24 @@ func run(
 		logger.Info("authz client connected", "endpoint", cfg.Authz.Endpoint)
 	}
 
-	// --- Audit store ---
-	var auditStore audit.Store
-	if pgStore, ok := st.(*postgres.Store); ok {
-		pgAudit := audit.NewPostgresStore(pgStore.Pool(), logger.With("component", "audit"))
-		if err := pgAudit.Migrate(ctx); err != nil {
-			return fmt.Errorf("running audit migrations: %w", err)
+	// --- Optional central audit emitter ---
+	var (
+		auditClient   *audit.Client
+		auditRecorder audit.Recorder
+	)
+	if cfg.Audit.IsConfigured() {
+		auditClient, err = audit.NewRouterClient(&cfg.Audit, logger.With("component", "audit"))
+		if err != nil {
+			return fmt.Errorf("initializing audit client: %w", err)
 		}
-		auditStore = pgAudit
-		logger.Info("audit store initialized (shared postgres pool)")
+		auditRecorder = audit.NewClientRecorder(auditClient, "csar-authn")
+		defer func() { _ = auditClient.Close() }()
+		logger.Info("central audit client initialized", "base_url", cfg.Audit.RouterBaseURL)
 	}
 
 	// --- Routes ---
 	mux := http.NewServeMux()
-	h := handler.New(st, sessionMgr, sessMgr, oauthMgr, stsHandler, authzClient, auditStore, logger, cfg)
+	h := handler.New(st, sessionMgr, sessMgr, oauthMgr, stsHandler, authzClient, auditRecorder, logger, cfg)
 	h.RegisterRoutes(mux)
 
 	// Health and readiness endpoints.

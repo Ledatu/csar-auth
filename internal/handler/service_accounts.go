@@ -34,7 +34,7 @@ func (h *Handler) requireSAPermission(r *http.Request, subject string) *apierror
 }
 
 func (h *Handler) recordAudit(r *http.Request, actor, action, targetType, targetID string, afterState json.RawMessage) {
-	if h.auditStore == nil {
+	if h.auditRecorder == nil {
 		return
 	}
 	event := &audit.Event{
@@ -45,7 +45,7 @@ func (h *Handler) recordAudit(r *http.Request, actor, action, targetType, target
 		ScopeType:  "platform",
 		AfterState: afterState,
 	}
-	if err := h.auditStore.Record(r.Context(), event); err != nil {
+	if err := h.auditRecorder.Record(r.Context(), event); err != nil {
 		h.logger.Warn("failed to record audit event", "action", action, "error", err)
 	}
 }
