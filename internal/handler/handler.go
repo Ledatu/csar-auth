@@ -126,6 +126,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /auth/me/check", h.handleCheck)
 
 		// Service account admin endpoints.
+		mux.HandleFunc("GET /admin/users", h.handleListAdminUsers)
 		mux.HandleFunc("GET /admin/service-accounts", h.handleListServiceAccounts)
 		mux.HandleFunc("POST /admin/service-accounts", h.handleCreateServiceAccount)
 		mux.HandleFunc("GET /admin/service-accounts/{name}", h.handleGetServiceAccount)

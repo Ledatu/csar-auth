@@ -440,6 +440,64 @@ func (s *Store) CountOAuthAccounts(ctx context.Context, userID uuid.UUID) (int, 
 	return count, nil
 }
 
+func (s *Store) SearchUsers(ctx context.Context, params store.UserSearchParams) ([]store.UserSearchResult, error) {
+	query := strings.TrimSpace(strings.ToLower(params.Query))
+	if params.Limit <= 0 || query == "" {
+		return []store.UserSearchResult{}, nil
+	}
+
+	exactID := uuid.Nil
+	hasExactID := false
+	if parsed, err := uuid.Parse(query); err == nil {
+		exactID = parsed
+		hasExactID = true
+	}
+
+	containsPattern := "%" + escapeLikePattern(query) + "%"
+	prefixPattern := escapeLikePattern(query) + "%"
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, COALESCE(email, ''), display_name, avatar_url
+		 FROM users
+		 WHERE merged_into IS NULL
+		   AND (
+		     ($1 AND id = $2)
+		     OR lower(COALESCE(email, '')) LIKE $3 ESCAPE '\'
+		     OR lower(display_name) LIKE $3 ESCAPE '\'
+		   )
+		 ORDER BY CASE
+		     WHEN $1 AND id = $2 THEN 0
+		     WHEN lower(COALESCE(email, '')) = $4 THEN 1
+		     WHEN lower(display_name) = $4 THEN 2
+		     WHEN lower(COALESCE(email, '')) LIKE $5 ESCAPE '\' THEN 3
+		     WHEN lower(display_name) LIKE $5 ESCAPE '\' THEN 4
+		     WHEN lower(COALESCE(email, '')) LIKE $3 ESCAPE '\' THEN 5
+		     ELSE 6
+		   END,
+		   updated_at DESC,
+		   created_at DESC
+		 LIMIT $6`,
+		hasExactID, exactID, containsPattern, query, prefixPattern, params.Limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search users: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]store.UserSearchResult, 0, params.Limit)
+	for rows.Next() {
+		var row store.UserSearchResult
+		if err := rows.Scan(&row.ID, &row.Email, &row.DisplayName, &row.AvatarURL); err != nil {
+			return nil, fmt.Errorf("scanning searched user: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating searched users: %w", err)
+	}
+	return out, nil
+}
+
 // --- Bot Verification ---
 
 func (s *Store) CreateBotVerification(ctx context.Context, v *store.BotVerification) error {
@@ -783,4 +841,9 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func escapeLikePattern(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(s)
 }

@@ -511,6 +511,98 @@ func (s *Store) ListAdminSessions(_ context.Context, params store.AdminSessionLi
 	return page, hasMore, nil
 }
 
+func (s *Store) SearchUsers(_ context.Context, params store.UserSearchParams) ([]store.UserSearchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := strings.TrimSpace(strings.ToLower(params.Query))
+	if params.Limit <= 0 || query == "" {
+		return []store.UserSearchResult{}, nil
+	}
+
+	exactID := uuid.Nil
+	hasExactID := false
+	if parsed, err := uuid.Parse(query); err == nil {
+		exactID = parsed
+		hasExactID = true
+	}
+
+	type rankedUser struct {
+		result store.UserSearchResult
+		rank   int
+	}
+
+	ranked := make([]rankedUser, 0, len(s.users))
+	for _, u := range s.users {
+		if u.MergedInto != nil {
+			continue
+		}
+
+		email := strings.ToLower(u.Email)
+		displayName := strings.ToLower(u.DisplayName)
+		idText := strings.ToLower(u.ID.String())
+
+		rank, matched := userSearchRank(hasExactID, exactID, idText, email, displayName, query)
+		if !matched {
+			continue
+		}
+
+		ranked = append(ranked, rankedUser{
+			result: store.UserSearchResult{
+				ID:          u.ID,
+				Email:       u.Email,
+				DisplayName: u.DisplayName,
+				AvatarURL:   u.AvatarURL,
+			},
+			rank: rank,
+		})
+	}
+
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].rank != ranked[j].rank {
+			return ranked[i].rank < ranked[j].rank
+		}
+		if ranked[i].result.DisplayName != ranked[j].result.DisplayName {
+			return ranked[i].result.DisplayName < ranked[j].result.DisplayName
+		}
+		if ranked[i].result.Email != ranked[j].result.Email {
+			return ranked[i].result.Email < ranked[j].result.Email
+		}
+		return ranked[i].result.ID.String() < ranked[j].result.ID.String()
+	})
+
+	if len(ranked) > params.Limit {
+		ranked = ranked[:params.Limit]
+	}
+
+	out := make([]store.UserSearchResult, len(ranked))
+	for i := range ranked {
+		out[i] = ranked[i].result
+	}
+	return out, nil
+}
+
+func userSearchRank(hasExactID bool, exactID uuid.UUID, idText, email, displayName, query string) (int, bool) {
+	switch {
+	case hasExactID && exactID.String() == idText:
+		return 0, true
+	case email == query:
+		return 1, true
+	case displayName == query:
+		return 2, true
+	case strings.HasPrefix(email, query):
+		return 3, true
+	case strings.HasPrefix(displayName, query):
+		return 4, true
+	case strings.Contains(email, query):
+		return 5, true
+	case strings.Contains(displayName, query):
+		return 6, true
+	default:
+		return 0, false
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Account Merge methods
 // ---------------------------------------------------------------------------

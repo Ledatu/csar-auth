@@ -118,6 +118,20 @@ type AdminSessionRow struct {
 	UserEmail string
 }
 
+// UserSearchParams configures a bounded admin user lookup.
+type UserSearchParams struct {
+	Query string
+	Limit int
+}
+
+// UserSearchResult is a browser-safe user summary for admin lookup flows.
+type UserSearchResult struct {
+	ID          uuid.UUID
+	Email       string
+	DisplayName string
+	AvatarURL   string
+}
+
 // ServiceAccount represents an STS service account stored in the database.
 type ServiceAccount struct {
 	Name              string
@@ -231,6 +245,10 @@ type Store interface {
 	// RevokeAdminSession revokes an active session by its opaque admin-facing ID.
 	// Returns ErrNotFound if the session does not exist or is already inactive.
 	RevokeAdminSession(ctx context.Context, adminSessionID string) (*AdminSessionRow, error)
+
+	// SearchUsers returns bounded browser-safe user summaries for admin lookup flows.
+	// Implementations should exclude merged users and respect the requested limit.
+	SearchUsers(ctx context.Context, params UserSearchParams) ([]UserSearchResult, error)
 
 	// --- Account Merge ---
 
