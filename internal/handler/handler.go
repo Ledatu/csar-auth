@@ -133,6 +133,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /admin/service-accounts/{name}/rotate", h.handleRotateServiceAccount)
 
 		mux.HandleFunc("GET /admin/sessions", h.handleListAdminSessions)
+		mux.HandleFunc("POST /admin/sessions/{session_id}/revoke", h.handleRevokeAdminSession)
 	}
 }
 

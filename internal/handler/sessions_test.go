@@ -43,11 +43,12 @@ func newSessionsHandler(t *testing.T, authz *mockAuthzClient) (*Handler, *mock.S
 	}
 
 	h := &Handler{
-		store:       st,
-		sessionMgr:  sm,
-		sessMgr:     sessMgr,
-		authzClient: ac,
-		logger:      slog.Default(),
+		store:         st,
+		sessionMgr:    sm,
+		sessMgr:       sessMgr,
+		authzClient:   ac,
+		auditRecorder: &mockAuditRecorder{},
+		logger:        slog.Default(),
 	}
 	h.cfg.Store(&config.Config{
 		Cookie: config.CookieConfig{Name: "session"},
@@ -103,7 +104,12 @@ func TestAdminSessions_ListOK(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var body struct {
-		Sessions []sessionListItem `json:"sessions"`
+		Sessions   []sessionListItem `json:"sessions"`
+		Pagination struct {
+			Limit   int  `json:"limit"`
+			Offset  int  `json:"offset"`
+			HasMore bool `json:"has_more"`
+		} `json:"pagination"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -123,6 +129,9 @@ func TestAdminSessions_ListOK(t *testing.T) {
 	if !body.Sessions[0].IsActive {
 		t.Error("expected IsActive true")
 	}
+	if body.Pagination.Limit != 100 || body.Pagination.Offset != 0 || body.Pagination.HasMore {
+		t.Fatalf("unexpected pagination: %+v", body.Pagination)
+	}
 }
 
 func TestAdminSessions_Forbidden(t *testing.T) {
@@ -141,6 +150,127 @@ func TestAdminSessions_Forbidden(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminSessions_ListFiltersAndPagination(t *testing.T) {
+	authz := &mockAuthzClient{
+		checkAccessFn: func(_ context.Context, req *pb.CheckAccessRequest) (*pb.CheckAccessResponse, error) {
+			if req.Action != permSessionsRead {
+				t.Errorf("CheckAccess action = %q, want %q", req.Action, permSessionsRead)
+			}
+			return &pb.CheckAccessResponse{Allowed: true}, nil
+		},
+	}
+	h, st, _ := newSessionsHandler(t, authz)
+	token := issueSessionsBearer(t, h, st, sessionsTestUserID)
+
+	now := time.Now().UTC()
+	otherUserID := uuid.MustParse("22222222-2222-4222-8222-222222222222")
+	st.SeedUser(&store.User{ID: otherUserID, Email: "other@example.com", DisplayName: "Other"})
+	_ = st.CreateSession(context.Background(), &store.Session{
+		ID:         "sess-active-1",
+		UserID:     sessionsTestUserID,
+		CreatedAt:  now.Add(-2 * time.Hour),
+		LastSeenAt: now.Add(-10 * time.Minute),
+		ExpiresAt:  now.Add(24 * time.Hour),
+		UserAgent:  "ua-active-1",
+		IPAddress:  "127.0.0.1",
+	})
+	_ = st.CreateSession(context.Background(), &store.Session{
+		ID:         "sess-active-2",
+		UserID:     sessionsTestUserID,
+		CreatedAt:  now.Add(-3 * time.Hour),
+		LastSeenAt: now.Add(-20 * time.Minute),
+		ExpiresAt:  now.Add(24 * time.Hour),
+		UserAgent:  "ua-active-2",
+		IPAddress:  "127.0.0.2",
+	})
+	_ = st.CreateSession(context.Background(), &store.Session{
+		ID:         "sess-expired",
+		UserID:     otherUserID,
+		CreatedAt:  now.Add(-6 * time.Hour),
+		LastSeenAt: now.Add(-4 * time.Hour),
+		ExpiresAt:  now.Add(-time.Minute),
+		UserAgent:  "ua-expired",
+		IPAddress:  "127.0.0.3",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/sessions?email=sessions%40test.com&status=active&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.handleListAdminSessions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Sessions   []sessionListItem `json:"sessions"`
+		Pagination struct {
+			Limit   int  `json:"limit"`
+			Offset  int  `json:"offset"`
+			HasMore bool `json:"has_more"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(body.Sessions))
+	}
+	if body.Sessions[0].Email != "sessions@test.com" || !body.Sessions[0].IsActive {
+		t.Fatalf("unexpected session row: %+v", body.Sessions[0])
+	}
+	if body.Pagination.Limit != 1 || body.Pagination.Offset != 0 || !body.Pagination.HasMore {
+		t.Fatalf("unexpected pagination: %+v", body.Pagination)
+	}
+}
+
+func TestAdminSessions_RevokeOK(t *testing.T) {
+	authz := &mockAuthzClient{
+		checkAccessFn: func(_ context.Context, req *pb.CheckAccessRequest) (*pb.CheckAccessResponse, error) {
+			if req.Action != permSessionsRevoke {
+				t.Errorf("CheckAccess action = %q, want %q", req.Action, permSessionsRevoke)
+			}
+			return &pb.CheckAccessResponse{Allowed: true}, nil
+		},
+	}
+	h, st, _ := newSessionsHandler(t, authz)
+	token := issueSessionsBearer(t, h, st, sessionsTestUserID)
+
+	now := time.Now().UTC()
+	_ = st.CreateSession(context.Background(), &store.Session{
+		ID:         "sess-revoke",
+		UserID:     sessionsTestUserID,
+		CreatedAt:  now.Add(-time.Hour),
+		LastSeenAt: now.Add(-5 * time.Minute),
+		ExpiresAt:  now.Add(time.Hour),
+		UserAgent:  "ua-revoke",
+		IPAddress:  "127.0.0.1",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/sessions/"+safeSessionID("sess-revoke")+"/revoke", nil)
+	req.SetPathValue("session_id", safeSessionID("sess-revoke"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.handleRevokeAdminSession(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+	revoked, err := st.GetSession(context.Background(), "sess-revoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.RevokedAt == nil {
+		t.Fatal("expected session to be revoked")
+	}
+	events := h.auditRecorder.(*mockAuditRecorder).Events()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(events))
+	}
+	if events[0].Action != "session.revoke" || events[0].TargetID != safeSessionID("sess-revoke") {
+		t.Fatalf("unexpected audit event: %+v", events[0])
 	}
 }
 

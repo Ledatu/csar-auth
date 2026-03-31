@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,17 +18,28 @@ import (
 	pb "github.com/ledatu/csar-proto/csar/authz/v1"
 )
 
-const permSessionsRead = "platform.sessions.read"
+const (
+	permSessionsRead   = "platform.sessions.read"
+	permSessionsRevoke = "platform.sessions.revoke"
+)
 
 func (h *Handler) requireSessionsReadPermission(r *http.Request, subject string) *apierror.Response {
+	return h.requireSessionsPermission(r, subject, permSessionsRead)
+}
+
+func (h *Handler) requireSessionsRevokePermission(r *http.Request, subject string) *apierror.Response {
+	return h.requireSessionsPermission(r, subject, permSessionsRevoke)
+}
+
+func (h *Handler) requireSessionsPermission(r *http.Request, subject, action string) *apierror.Response {
 	resp, err := h.authzClient.client.CheckAccess(r.Context(), &pb.CheckAccessRequest{
 		Subject:   subject,
 		ScopeType: "platform",
 		Resource:  "admin",
-		Action:    permSessionsRead,
+		Action:    action,
 	})
 	if err != nil {
-		h.logger.Error("authz check failed", "subject", subject, "error", err)
+		h.logger.Error("authz check failed", "subject", subject, "action", action, "error", err)
 		return apierror.New("authz_error", http.StatusBadGateway, "authorization check failed")
 	}
 	if !resp.Allowed {
@@ -51,7 +63,14 @@ type sessionListItem struct {
 }
 
 type sessionListResponse struct {
-	Sessions []sessionListItem `json:"sessions"`
+	Sessions   []sessionListItem     `json:"sessions"`
+	Pagination sessionListPagination `json:"pagination"`
+}
+
+type sessionListPagination struct {
+	Limit   int  `json:"limit"`
+	Offset  int  `json:"offset"`
+	HasMore bool `json:"has_more"`
 }
 
 func safeSessionID(id string) string {
@@ -97,11 +116,18 @@ func (h *Handler) bearerClaims(r *http.Request) (string, *session.Claims) {
 	return token, claims
 }
 
-func writeSessionListResponse(w http.ResponseWriter, sessions []sessionListItem) {
+func writeSessionListResponse(w http.ResponseWriter, sessions []sessionListItem, limit, offset int, hasMore bool) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Vary", "Authorization, Cookie")
-	_ = json.NewEncoder(w).Encode(sessionListResponse{Sessions: sessions})
+	_ = json.NewEncoder(w).Encode(sessionListResponse{
+		Sessions: sessions,
+		Pagination: sessionListPagination{
+			Limit:   limit,
+			Offset:  offset,
+			HasMore: hasMore,
+		},
+	})
 }
 
 func (h *Handler) handleListAdminSessions(w http.ResponseWriter, r *http.Request) {
@@ -148,24 +174,35 @@ func (h *Handler) handleListAdminSessions(w http.ResponseWriter, r *http.Request
 		offset = n
 	}
 
-	activeOnly := false
-	if v := r.URL.Query().Get("active_only"); v != "" {
+	status := "all"
+	if v := strings.TrimSpace(r.URL.Query().Get("status")); v != "" {
+		status = strings.ToLower(v)
+		switch status {
+		case "all", "active", "revoked", "expired":
+		default:
+			apierror.New("bad_request", http.StatusBadRequest, "invalid status").Write(w)
+			return
+		}
+	} else if v := r.URL.Query().Get("active_only"); v != "" {
 		switch v {
 		case "1", "true", "yes":
-			activeOnly = true
+			status = "active"
 		case "0", "false", "no":
-			activeOnly = false
+			status = "all"
 		default:
 			apierror.New("bad_request", http.StatusBadRequest, "invalid active_only").Write(w)
 			return
 		}
 	}
 
-	rows, err := h.store.ListAdminSessions(r.Context(), store.AdminSessionListParams{
-		UserID:     userFilter,
-		Limit:      limit,
-		Offset:     offset,
-		ActiveOnly: activeOnly,
+	emailFilter := strings.TrimSpace(r.URL.Query().Get("email"))
+
+	rows, hasMore, err := h.store.ListAdminSessions(r.Context(), store.AdminSessionListParams{
+		UserID: userFilter,
+		Email:  emailFilter,
+		Status: status,
+		Limit:  limit,
+		Offset: offset,
 	})
 	if err != nil {
 		h.logger.Error("failed to list admin sessions", "error", err)
@@ -179,7 +216,46 @@ func (h *Handler) handleListAdminSessions(w http.ResponseWriter, r *http.Request
 		out = append(out, sessionToItem(row.Session, row.UserEmail, now, ""))
 	}
 
-	writeSessionListResponse(w, out)
+	writeSessionListResponse(w, out, limit, offset, hasMore)
+}
+
+func (h *Handler) handleRevokeAdminSession(w http.ResponseWriter, r *http.Request) {
+	subject := h.extractSubject(r)
+	if subject == "" {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+	if apiErr := h.requireSessionsRevokePermission(r, subject); apiErr != nil {
+		apiErr.Write(w)
+		return
+	}
+
+	adminSessionID := strings.TrimSpace(r.PathValue("session_id"))
+	if adminSessionID == "" {
+		apierror.New("bad_request", http.StatusBadRequest, "session_id is required").Write(w)
+		return
+	}
+
+	row, err := h.store.RevokeAdminSession(r.Context(), adminSessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			apierror.New("not_found", http.StatusNotFound, "session not found or already inactive").Write(w)
+			return
+		}
+		h.logger.Error("failed to revoke admin session", "session_id", adminSessionID, "error", err)
+		apierror.New("internal_error", http.StatusInternalServerError, "failed to revoke session").Write(w)
+		return
+	}
+
+	afterJSON, _ := json.Marshal(map[string]any{
+		"session_id": adminSessionID,
+		"user_id":    row.UserID.String(),
+		"email":      row.UserEmail,
+		"revoked_at": row.RevokedAt.Unix(),
+	})
+	h.recordAudit(r, subject, "session.revoke", "session", adminSessionID, afterJSON)
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) handleMeSessions(w http.ResponseWriter, r *http.Request) {
@@ -220,5 +296,5 @@ func (h *Handler) handleMeSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeSessionListResponse(w, out)
+	writeSessionListResponse(w, out, len(out), 0, false)
 }

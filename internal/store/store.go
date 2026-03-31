@@ -105,10 +105,11 @@ type Session struct {
 
 // AdminSessionListParams configures pagination and filters for platform-admin session listing.
 type AdminSessionListParams struct {
-	UserID     *uuid.UUID
-	Limit      int
-	Offset     int
-	ActiveOnly bool
+	UserID *uuid.UUID
+	Email  string
+	Status string
+	Limit  int
+	Offset int
 }
 
 // AdminSessionRow is a session joined with the owning user's email.
@@ -224,9 +225,12 @@ type Store interface {
 	ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
 
 	// ListAdminSessions returns sessions for platform administration dashboards.
-	// UserID, when non-nil, restricts results to that user. ActiveOnly, when true,
-	// includes only rows that are not revoked and not expired.
-	ListAdminSessions(ctx context.Context, params AdminSessionListParams) ([]AdminSessionRow, error)
+	// The boolean reports whether more rows exist beyond the current page.
+	ListAdminSessions(ctx context.Context, params AdminSessionListParams) ([]AdminSessionRow, bool, error)
+
+	// RevokeAdminSession revokes an active session by its opaque admin-facing ID.
+	// Returns ErrNotFound if the session does not exist or is already inactive.
+	RevokeAdminSession(ctx context.Context, adminSessionID string) (*AdminSessionRow, error)
 
 	// --- Account Merge ---
 

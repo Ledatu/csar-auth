@@ -61,6 +61,31 @@ func (s *Store) RevokeSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+func (s *Store) RevokeAdminSession(ctx context.Context, adminSessionID string) (*store.AdminSessionRow, error) {
+	row := &store.AdminSessionRow{}
+	err := s.pool.QueryRow(ctx,
+		`UPDATE sessions s
+		 SET revoked_at = now()
+		 FROM users u
+		 WHERE s.user_id = u.id
+		   AND encode(substr(digest(s.id, 'sha256'), 1, 8), 'hex') = $1
+		   AND s.revoked_at IS NULL
+		   AND s.expires_at > now()
+		 RETURNING s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at, s.user_agent, s.ip_address, s.revoked_at, COALESCE(u.email, '')`,
+		adminSessionID,
+	).Scan(
+		&row.ID, &row.UserID, &row.CreatedAt, &row.LastSeenAt, &row.ExpiresAt,
+		&row.UserAgent, &row.IPAddress, &row.RevokedAt, &row.UserEmail,
+	)
+	if pgutil.IsNotFound(err) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("revoke admin session: %w", err)
+	}
+	return row, nil
+}
+
 func (s *Store) RevokeUserSessions(ctx context.Context, userID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
@@ -105,7 +130,7 @@ func (s *Store) ListUserSessions(ctx context.Context, userID uuid.UUID) ([]store
 	return sessions, rows.Err()
 }
 
-func (s *Store) ListAdminSessions(ctx context.Context, params store.AdminSessionListParams) ([]store.AdminSessionRow, error) {
+func (s *Store) ListAdminSessions(ctx context.Context, params store.AdminSessionListParams) ([]store.AdminSessionRow, bool, error) {
 	var b strings.Builder
 	args := make([]interface{}, 0, 4)
 	n := 1
@@ -120,15 +145,26 @@ WHERE 1=1`)
 		args = append(args, *params.UserID)
 		n++
 	}
-	if params.ActiveOnly {
+	if params.Email != "" {
+		fmt.Fprintf(&b, " AND u.email ILIKE $%d", n)
+		args = append(args, "%"+params.Email+"%")
+		n++
+	}
+	switch params.Status {
+	case "", "all":
+	case "active":
 		b.WriteString(" AND s.revoked_at IS NULL AND s.expires_at > now()")
+	case "revoked":
+		b.WriteString(" AND s.revoked_at IS NOT NULL")
+	case "expired":
+		b.WriteString(" AND s.revoked_at IS NULL AND s.expires_at <= now()")
 	}
 	fmt.Fprintf(&b, " ORDER BY s.last_seen_at DESC LIMIT $%d OFFSET $%d", n, n+1)
-	args = append(args, params.Limit, params.Offset)
+	args = append(args, params.Limit+1, params.Offset)
 
 	rows, err := s.pool.Query(ctx, b.String(), args...)
 	if err != nil {
-		return nil, fmt.Errorf("list admin sessions: %w", err)
+		return nil, false, fmt.Errorf("list admin sessions: %w", err)
 	}
 	defer rows.Close()
 
@@ -139,9 +175,17 @@ WHERE 1=1`)
 			&row.ID, &row.UserID, &row.CreatedAt, &row.LastSeenAt, &row.ExpiresAt,
 			&row.UserAgent, &row.IPAddress, &row.RevokedAt, &row.UserEmail,
 		); err != nil {
-			return nil, fmt.Errorf("scanning admin session: %w", err)
+			return nil, false, fmt.Errorf("scanning admin session: %w", err)
 		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+
+	hasMore := len(out) > params.Limit
+	if hasMore {
+		out = out[:params.Limit]
+	}
+	return out, hasMore, nil
 }

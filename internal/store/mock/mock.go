@@ -3,6 +3,8 @@ package mock
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -387,6 +389,34 @@ func (s *Store) RevokeSession(_ context.Context, sessionID string) error {
 	return nil
 }
 
+func (s *Store) RevokeAdminSession(_ context.Context, adminSessionID string) (*store.AdminSessionRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	for _, sess := range s.sessions {
+		if safeSessionID(sess.ID) != adminSessionID {
+			continue
+		}
+		if sess.RevokedAt != nil || !now.Before(sess.ExpiresAt) {
+			return nil, store.ErrNotFound
+		}
+
+		revokedAt := now
+		sess.RevokedAt = &revokedAt
+
+		email := ""
+		if u, ok := s.users[sess.UserID]; ok {
+			email = u.Email
+		}
+
+		cp := *sess
+		return &store.AdminSessionRow{Session: cp, UserEmail: email}, nil
+	}
+
+	return nil, store.ErrNotFound
+}
+
 func (s *Store) RevokeUserSessions(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -426,7 +456,7 @@ func (s *Store) ListUserSessions(_ context.Context, userID uuid.UUID) ([]store.S
 	return out, nil
 }
 
-func (s *Store) ListAdminSessions(_ context.Context, params store.AdminSessionListParams) ([]store.AdminSessionRow, error) {
+func (s *Store) ListAdminSessions(_ context.Context, params store.AdminSessionListParams) ([]store.AdminSessionRow, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -435,14 +465,30 @@ func (s *Store) ListAdminSessions(_ context.Context, params store.AdminSessionLi
 		if params.UserID != nil && sess.UserID != *params.UserID {
 			continue
 		}
-		if params.ActiveOnly && (sess.RevokedAt != nil || !now.Before(sess.ExpiresAt)) {
-			continue
-		}
-		u, ok := s.users[sess.UserID]
 		email := ""
-		if ok {
+		if u, ok := s.users[sess.UserID]; ok {
 			email = u.Email
 		}
+		if params.Email != "" && !strings.Contains(strings.ToLower(email), strings.ToLower(params.Email)) {
+			continue
+		}
+
+		switch params.Status {
+		case "", "all":
+		case "active":
+			if sess.RevokedAt != nil || !now.Before(sess.ExpiresAt) {
+				continue
+			}
+		case "revoked":
+			if sess.RevokedAt == nil {
+				continue
+			}
+		case "expired":
+			if sess.RevokedAt != nil || now.Before(sess.ExpiresAt) {
+				continue
+			}
+		}
+
 		cp := *sess
 		rows = append(rows, store.AdminSessionRow{Session: cp, UserEmail: email})
 	}
@@ -451,13 +497,18 @@ func (s *Store) ListAdminSessions(_ context.Context, params store.AdminSessionLi
 	})
 	start := params.Offset
 	if start > len(rows) {
-		return nil, nil
+		return nil, false, nil
 	}
-	end := start + params.Limit
+	end := start + params.Limit + 1
 	if end > len(rows) {
 		end = len(rows)
 	}
-	return rows[start:end], nil
+	page := rows[start:end]
+	hasMore := len(page) > params.Limit
+	if hasMore {
+		page = page[:params.Limit]
+	}
+	return page, hasMore, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -706,4 +757,9 @@ func (s *Store) SeedUser(u *store.User) {
 	defer s.mu.Unlock()
 	cp := *u
 	s.users[u.ID] = &cp
+}
+
+func safeSessionID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:8])
 }
