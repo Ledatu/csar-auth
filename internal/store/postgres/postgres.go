@@ -516,8 +516,13 @@ func (s *Store) CreateBotVerification(ctx context.Context, v *store.BotVerificat
 func (s *Store) GetBotVerification(ctx context.Context, id uuid.UUID) (*store.BotVerification, error) {
 	v := &store.BotVerification{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, code_hash, intent, user_id, provider, provider_user_id, provider_display,
-		        status, created_at, expires_at, confirmed_at, consumed_at, user_agent, ip_address
+		`SELECT id, code_hash, intent, user_id,
+		        COALESCE(provider, ''),
+		        COALESCE(provider_user_id, ''),
+		        COALESCE(provider_display, ''),
+		        status, created_at, expires_at, confirmed_at, consumed_at,
+		        COALESCE(user_agent, ''),
+		        COALESCE(ip_address, '')
 		 FROM bot_verifications WHERE id = $1`, id,
 	).Scan(&v.ID, &v.CodeHash, &v.Intent, &v.UserID, &v.Provider, &v.ProviderUserID, &v.ProviderDisplay,
 		&v.Status, &v.CreatedAt, &v.ExpiresAt, &v.ConfirmedAt, &v.ConsumedAt, &v.UserAgent, &v.IPAddress)
@@ -558,8 +563,13 @@ func (s *Store) ConsumeBotVerification(ctx context.Context, id uuid.UUID) (*stor
 		`UPDATE bot_verifications
 		 SET status = 'consumed', consumed_at = now()
 		 WHERE id = $1 AND status = 'confirmed' AND expires_at > now()
-		 RETURNING id, code_hash, intent, user_id, provider, provider_user_id, provider_display,
-		           status, created_at, expires_at, confirmed_at, consumed_at, user_agent, ip_address`,
+		 RETURNING id, code_hash, intent, user_id,
+		           COALESCE(provider, ''),
+		           COALESCE(provider_user_id, ''),
+		           COALESCE(provider_display, ''),
+		           status, created_at, expires_at, confirmed_at, consumed_at,
+		           COALESCE(user_agent, ''),
+		           COALESCE(ip_address, '')`,
 		id,
 	).Scan(&v.ID, &v.CodeHash, &v.Intent, &v.UserID, &v.Provider, &v.ProviderUserID, &v.ProviderDisplay,
 		&v.Status, &v.CreatedAt, &v.ExpiresAt, &v.ConfirmedAt, &v.ConsumedAt, &v.UserAgent, &v.IPAddress)
