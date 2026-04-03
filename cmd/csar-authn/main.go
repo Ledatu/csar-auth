@@ -46,10 +46,10 @@ func main() {
 	sf := configload.NewSourceFlags()
 	sf.RegisterFlags(flag.CommandLine)
 
-	metricsAddr := ""
+	healthAddr := ""
 	otlpEndpoint := ""
 	otlpInsecure := false
-	flag.StringVar(&metricsAddr, "metrics-addr", metricsAddr, "Prometheus metrics listen address (empty to disable)")
+	flag.StringVar(&healthAddr, "health-addr", healthAddr, "plain HTTP health/readiness/metrics sidecar listen address (empty to disable)")
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", otlpEndpoint, "OTLP gRPC endpoint for tracing (empty to disable)")
 	flag.BoolVar(&otlpInsecure, "otlp-insecure", otlpInsecure, "use insecure connection for OTLP")
 	flag.Parse()
@@ -59,7 +59,7 @@ func main() {
 	})
 	logger := slog.New(logutil.NewRedactingHandler(inner))
 
-	if err := run(sf, metricsAddr, otlpEndpoint, otlpInsecure, logger); err != nil {
+	if err := run(sf, healthAddr, otlpEndpoint, otlpInsecure, logger); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -67,7 +67,7 @@ func main() {
 
 func run(
 	sf *configload.SourceFlags,
-	metricsAddr, otlpEndpoint string,
+	healthAddr, otlpEndpoint string,
 	otlpInsecure bool,
 	logger *slog.Logger,
 ) error {
@@ -85,9 +85,9 @@ func run(
 		"providers", len(cfg.OAuth.Providers),
 	)
 
-	// Use config-level metrics_addr if CLI flag is empty.
-	if metricsAddr == "" {
-		metricsAddr = cfg.MetricsAddr
+	// Use config-level health_addr if CLI flag is empty.
+	if healthAddr == "" {
+		healthAddr = cfg.ProbeSidecar.Addr
 	}
 
 	// --- Observability ---
@@ -313,25 +313,25 @@ func run(
 		logger.Info("config watcher started", "interval", interval)
 	}
 
-	// --- Metrics sidecar ---
-	var metricsSidecar *health.Sidecar
-	if metricsAddr != "" {
-		metricsSidecar, err = health.NewSidecar(health.SidecarConfig{
-			Addr:      metricsAddr,
+	// --- Health/metrics sidecar ---
+	var healthSidecar *health.Sidecar
+	if healthAddr != "" {
+		healthSidecar, err = health.NewSidecar(health.SidecarConfig{
+			Addr:      healthAddr,
 			Version:   Version,
 			Readiness: rc,
 			Metrics:   observe.MetricsHandler(reg),
-			Logger:    logger.With("component", "metrics"),
+			Logger:    logger.With("component", "health"),
 		})
 		if err != nil {
-			return fmt.Errorf("creating metrics sidecar: %w", err)
+			return fmt.Errorf("creating health sidecar: %w", err)
 		}
 		go func() {
-			if err := metricsSidecar.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error("metrics sidecar error", "error", err)
+			if err := healthSidecar.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("health sidecar error", "error", err)
 			}
 		}()
-		logger.Info("metrics sidecar started", "addr", metricsAddr)
+		logger.Info("health sidecar started", "addr", healthAddr)
 	}
 
 	// --- Main HTTP server ---
@@ -355,11 +355,11 @@ func run(
 	}
 
 	runErr := srv.Run(ctx)
-	if metricsSidecar != nil {
+	if healthSidecar != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
-		if err := metricsSidecar.Shutdown(shutdownCtx); err != nil {
-			logger.Error("metrics sidecar shutdown error", "error", err)
+		if err := healthSidecar.Shutdown(shutdownCtx); err != nil {
+			logger.Error("health sidecar shutdown error", "error", err)
 		}
 	}
 	return runErr
