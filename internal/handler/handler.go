@@ -90,6 +90,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Current user's active sessions: GET /auth/me/sessions
 	mux.HandleFunc("GET /auth/me/sessions", h.handleMeSessions)
+	mux.HandleFunc("POST /auth/me/sessions/revoke-others", h.handleRevokeOtherMeSessions)
+	mux.HandleFunc("POST /auth/me/sessions/{session_id}/revoke", h.handleRevokeMeSession)
 
 	// Session validation for router subrequests: GET /auth/validate
 	mux.HandleFunc("GET /auth/validate", h.handleValidate)

@@ -358,3 +358,104 @@ func TestMeSessions_BearerAddsSyntheticCurrentWhenNoSessionRow(t *testing.T) {
 		t.Fatalf("user_agent = %q", body.Sessions[0].UserAgent)
 	}
 }
+
+func TestMeSessions_RevokeOneBySafeID(t *testing.T) {
+	h, st, sessMgr := newSessionsHandler(t, nil)
+	uid := sessionsTestUserID
+	st.SeedUser(&store.User{
+		ID:          uid,
+		Email:       "me@test.com",
+		DisplayName: "Me",
+	})
+
+	current, err := sessMgr.Create(context.Background(), uid, "ua-current", "10.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := sessMgr.Create(context.Background(), uid, "ua-other", "10.0.0.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/me/sessions/"+safeSessionID(other.ID)+"/revoke", nil)
+	req.SetPathValue("session_id", safeSessionID(other.ID))
+	req.AddCookie(&http.Cookie{Name: "session", Value: current.ID})
+	w := httptest.NewRecorder()
+	h.handleRevokeMeSession(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	revoked, err := st.GetSession(context.Background(), other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.RevokedAt == nil {
+		t.Fatal("expected target session to be revoked")
+	}
+
+	stillCurrent, err := st.GetSession(context.Background(), current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillCurrent.RevokedAt != nil {
+		t.Fatal("current session should stay active")
+	}
+}
+
+func TestMeSessions_RevokeOthersKeepsCurrent(t *testing.T) {
+	h, st, sessMgr := newSessionsHandler(t, nil)
+	uid := sessionsTestUserID
+	st.SeedUser(&store.User{
+		ID:          uid,
+		Email:       "me@test.com",
+		DisplayName: "Me",
+	})
+
+	current, err := sessMgr.Create(context.Background(), uid, "ua-current", "10.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherA, err := sessMgr.Create(context.Background(), uid, "ua-other-a", "10.0.0.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherB, err := sessMgr.Create(context.Background(), uid, "ua-other-b", "10.0.0.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/me/sessions/revoke-others", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: current.ID})
+	w := httptest.NewRecorder()
+	h.handleRevokeOtherMeSessions(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	currentRow, err := st.GetSession(context.Background(), current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentRow.RevokedAt != nil {
+		t.Fatal("current session should stay active")
+	}
+
+	otherARow, err := st.GetSession(context.Background(), otherA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherARow.RevokedAt == nil {
+		t.Fatal("other session A should be revoked")
+	}
+
+	otherBRow, err := st.GetSession(context.Background(), otherB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherBRow.RevokedAt == nil {
+		t.Fatal("other session B should be revoked")
+	}
+}

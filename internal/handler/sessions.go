@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -128,6 +129,20 @@ func writeSessionListResponse(w http.ResponseWriter, sessions []sessionListItem,
 			HasMore: hasMore,
 		},
 	})
+}
+
+func (h *Handler) findUserSessionBySafeID(ctx context.Context, userID uuid.UUID, safeID string) (*store.Session, error) {
+	sessions, err := h.store.ListUserSessions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		if safeSessionID(sessions[i].ID) == safeID {
+			sess := sessions[i]
+			return &sess, nil
+		}
+	}
+	return nil, store.ErrNotFound
 }
 
 func (h *Handler) handleListAdminSessions(w http.ResponseWriter, r *http.Request) {
@@ -297,4 +312,87 @@ func (h *Handler) handleMeSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSessionListResponse(w, out, len(out), 0, false)
+}
+
+func (h *Handler) handleRevokeMeSession(w http.ResponseWriter, r *http.Request) {
+	sess, user, ok := h.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+
+	sessionID := strings.TrimSpace(r.PathValue("session_id"))
+	if sessionID == "" {
+		apierror.New("bad_request", http.StatusBadRequest, "session_id is required").Write(w)
+		return
+	}
+
+	target, err := h.findUserSessionBySafeID(r.Context(), user.ID, sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			apierror.New("not_found", http.StatusNotFound, "session not found").Write(w)
+			return
+		}
+		h.logger.Error("failed to resolve user session", "user_id", user.ID, "session_id", sessionID, "error", err)
+		apierror.New("internal_error", http.StatusInternalServerError, "failed to revoke session").Write(w)
+		return
+	}
+
+	if err := h.sessMgr.Revoke(r.Context(), target.ID); err != nil {
+		h.logger.Error("failed to revoke user session", "user_id", user.ID, "session_id", sessionID, "error", err)
+		apierror.New("internal_error", http.StatusInternalServerError, "failed to revoke session").Write(w)
+		return
+	}
+
+	afterJSON, _ := json.Marshal(map[string]any{
+		"session_id": sessionID,
+		"user_id":    user.ID.String(),
+		"revoked_at": time.Now().UTC().Unix(),
+	})
+	h.recordAudit(r, user.ID.String(), "session.self_revoke", "session", sessionID, afterJSON)
+
+	if sess != nil && target.ID == sess.ID {
+		http.SetCookie(w, h.sessionCookie("", -1))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleRevokeOtherMeSessions(w http.ResponseWriter, r *http.Request) {
+	sess, user, ok := h.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+
+	sessions, err := h.store.ListUserSessions(r.Context(), user.ID)
+	if err != nil {
+		h.logger.Error("failed to list user sessions for revoke others", "user_id", user.ID, "error", err)
+		apierror.New("internal_error", http.StatusInternalServerError, "failed to revoke sessions").Write(w)
+		return
+	}
+
+	currentID := ""
+	if sess != nil {
+		currentID = sess.ID
+	}
+
+	revokedCount := 0
+	for i := range sessions {
+		if currentID != "" && sessions[i].ID == currentID {
+			continue
+		}
+		if err := h.sessMgr.Revoke(r.Context(), sessions[i].ID); err != nil {
+			h.logger.Error("failed to revoke other user session", "user_id", user.ID, "session_id", safeSessionID(sessions[i].ID), "error", err)
+			apierror.New("internal_error", http.StatusInternalServerError, "failed to revoke sessions").Write(w)
+			return
+		}
+		revokedCount++
+	}
+
+	afterJSON, _ := json.Marshal(map[string]any{
+		"user_id":       user.ID.String(),
+		"current_kept":  currentID != "",
+		"revoked_count": revokedCount,
+	})
+	h.recordAudit(r, user.ID.String(), "session.revoke_others", "user", user.ID.String(), afterJSON)
+
+	w.WriteHeader(http.StatusNoContent)
 }
